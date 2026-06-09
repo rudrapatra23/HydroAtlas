@@ -1,0 +1,54 @@
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap");
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+:root {
+  font-family: "Inter", system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+  text-rendering: optimizeLegibility;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+  
+  /* Hard clear system-level tap flashes */
+  -webkit-tap-highlight-color: transparent;
+}
+
+* {
+  box-sizing: border-box;
+  /* Eliminates default browser blue selection boxes on focused elements */
+  outline: none;
+}
+
+html,
+body,
+#root {
+  margin: 0;
+  padding: 0;
+  height: 100vh;
+  width: 100vw;
+  overflow: hidden;
+}
+
+body {
+  /* Industrial Standard: Pure dark neutral base. 
+     Acts as a natural mask while map tiles asynchronously load, 
+     preventing bright or colorful layout flashing entirely. */
+  background-color: #020617; /* slate-950 */
+}
+
+/* Strip native browser user-agent stylings from specialized inputs */
+input[type="search"]::-webkit-search-decoration,
+input[type="search"]::-webkit-search-cancel-button,
+input[type="search"]::-webkit-search-results-button,
+input[type="search"]::-webkit-search-results-decoration {
+  display: none;
+}
+
+/* Ensure material icons don't drop down or warp container heights during font load */
+.material-symbols-rounded {
+  display: inline-block;
+  font-variant-numeric: tabular-nums;
+  line-height: 1;
+  color: inherit;
+}
