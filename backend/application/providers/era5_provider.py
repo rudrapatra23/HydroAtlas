@@ -1,67 +1,59 @@
 from __future__ import annotations
 
 from typing import Sequence, Tuple
-from pathlib import Path
 
 from application.providers.provider import Provider
 from application.dto.requests import BootstrapRequest, DownloadRequest
 from application.dto.responses import DownloadResponse
 
 
+class ProviderError(Exception):
+    """Error raised when a provider encounters a problem."""
+
+
 class ERA5Provider(Provider):
-    """Provider for ERA5 climate data. Wraps external era5-fetch package."""
+    """Provider for ERA5 climate data. Pure adapter for era5-fetch package."""
 
     def __init__(self):
-        # We'll import era5-fetch here to keep dependencies isolated
-        self._era5_fetch_available = False
         self._client = None
         try:
-            # Placeholder for actual era5-fetch import
-            # from era5_fetch import ERA5Client
-            self._era5_fetch_available = True
+            from era5_fetch import ERA5Client
+            self._era5_client_class = ERA5Client
         except ImportError:
-            pass
+            raise ProviderError("era5-fetch package not installed")
 
     async def bootstrap(self, request: BootstrapRequest) -> None:
-        if not self._era5_fetch_available:
-            raise ImportError("era5-fetch package not installed")
-        # In real implementation, initialize era5-fetch here
-        # self._client = ERA5Client(request.config)
+        from era5_fetch import ERA5Client
+        self._client = ERA5Client(request.config)
 
     async def download(self, request: DownloadRequest) -> DownloadResponse:
-        if not self._era5_fetch_available:
-            return DownloadResponse(
-                success=False,
-                error_message="era5-fetch package not available"
-            )
+        if not self._client:
+            raise ProviderError("Provider not bootstrapped")
 
-        try:
-            # Placeholder for real era5-fetch usage
-            # result = await self._client.download(...)
-            # return DownloadResponse(
-            #     success=True,
-            #     file_path=result.file_path,
-            #     checksum=result.checksum,
-            #     file_size=result.file_size
-            # )
-            return DownloadResponse(
-                success=False,
-                error_message="era5-fetch integration not fully implemented yet"
-            )
-        except Exception as e:
-            return DownloadResponse(
-                success=False,
-                error_message=str(e)
-            )
+        # Convert DownloadRequest to era5-fetch request
+        era5_request = {
+            "variable": request.variable,
+            "year": request.year,
+            "month": request.month,
+            "region": request.region,
+        }
+
+        # Call era5-fetch
+        result = await self._client.download(**era5_request)
+
+        # Convert era5-fetch result to DownloadResponse
+        return DownloadResponse(
+            success=True,
+            file_path=result.file_path,
+            checksum=result.checksum,
+            file_size=result.file_size,
+        )
 
     async def status(self) -> dict:
         return {
-            "available": self._era5_fetch_available,
-            "provider": "era5"
+            "available": self._client is not None,
+            "provider": "era5",
         }
 
     async def available_periods(self, variable: str) -> Sequence[Tuple[int, int]]:
-        if not self._era5_fetch_available:
-            return []
-        # In real implementation, query available periods from era5-fetch
-        return []
+        raise NotImplementedError("available_periods not yet implemented by era5-fetch")
