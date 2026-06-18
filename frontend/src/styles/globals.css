@@ -1,4 +1,4 @@
-@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&display=swap");
+@import url("https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600;700;800&display=swap");
 
 @tailwind base;
 @tailwind components;
@@ -20,21 +20,29 @@
   outline: none;
 }
 
-html,
-body,
-#root {
+/*
+ * Landing pages need normal document flow with scrolling.
+ * The Studio page (/studio) uses its own h-screen overflow-hidden root.
+ * We avoid conflicting by NOT forcing overflow:hidden at the html/body level.
+ */
+html {
   margin: 0;
   padding: 0;
-  height: 100vh;
-  width: 100vw;
-  overflow: hidden;
+  scroll-behavior: smooth;
 }
 
 body {
+  margin: 0;
+  padding: 0;
   /* Industrial Standard: Pure dark neutral base. 
      Acts as a natural mask while map tiles asynchronously load, 
      preventing bright or colorful layout flashing entirely. */
-  background-color: #020617; /* slate-950 */
+  background-color: #ffffff;
+}
+
+#root {
+  margin: 0;
+  padding: 0;
 }
 
 /* Strip native browser user-agent stylings from specialized inputs */
