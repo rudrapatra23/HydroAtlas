@@ -4,6 +4,9 @@ export default {
   content: ["./index.html", "./src/**/*.{ts,tsx}"],
   theme: {
     extend: {
+      fontFamily: {
+        sans: ['"Inter"', "system-ui", "-apple-system", "BlinkMacSystemFont", "sans-serif"],
+      },
       colors: {
         hydra: {
           bg: "#F7F9FC",
@@ -14,6 +17,9 @@ export default {
           flood: "#EF4444",
           drought: "#F59E0B",
         },
+        navy: {
+          950: "#0A0E27",
+        },
       },
       boxShadow: {
         glass: "0 12px 36px rgba(15, 23, 42, 0.10)",
@@ -22,7 +28,7 @@ export default {
         shell: "20px",
       },
       transitionDuration: {
-        300: "300ms",
+        "300": "300ms",
       },
     },
   },

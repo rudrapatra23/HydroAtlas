@@ -28,7 +28,7 @@ from typing import Any
 import s3fs
 import xarray as xr
 
-from app.domain.ports.climate_repository import (
+from domain.ports.climate_repository import (
     ClimateMetadata,
     ClimateRepository,
     SpatialExtent,

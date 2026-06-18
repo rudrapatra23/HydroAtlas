@@ -86,6 +86,12 @@ class Settings(BaseSettings):
         description="S3 endpoint URL (regional or custom).",
     )
 
+    # --- Database configuration ----------------------------------------
+    database_url: str = Field(
+        ...,
+        description="PostgreSQL database connection URL.",
+    )
+
     # --- Logging ------------------------------------------------------
     log_level: LogLevel = Field(
         ...,
