@@ -4,6 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import logging
 from pathlib import Path
+import time
 
 import geopandas as gpd
 import numpy as np
@@ -51,9 +52,12 @@ class RasterComputation:
         provider: str,
         year: int,
         month: int,
-        variable: str | None = None,
+        variable: str,
     ) -> tuple[xr.Dataset | xr.DataArray, Path]:
-        asset = await self.repository.get_by_period(year, month, provider, variable=variable)
+        t0 = time.perf_counter()
+        asset = await self.repository.get_by_period(year, month, provider, variable)
+        t1 = time.perf_counter()
+        logger.info("PostgreSQL asset lookup: %.3fs", t1 - t0)
         if not asset:
             raise ValueError(f"No dataset found for {provider}/{year}/{month:02d}")
         return self.read_raster_from_s3(asset)
@@ -131,15 +135,20 @@ class RasterComputation:
         with tempfile.NamedTemporaryFile(suffix='.nc', delete=False) as tmp:
             temp_path = Path(tmp.name)
         
+        t0 = time.perf_counter()
         self.storage.download(key, temp_path)
+        t1 = time.perf_counter()
+        logger.info("Download from S3: %.3fs", t1 - t0)
         
-        # Use rioxarray to open - it provides the rio accessor
-        rds = rioxarray.open_rasterio(temp_path)
-        logger.info("Opened raster file: %s", temp_path)
+        # Use xr.open_dataset so all variables (tp, swvl1, sro) are accessible
+        t0 = time.perf_counter()
+        rds = xr.open_dataset(temp_path, engine="netcdf4")
+        t1 = time.perf_counter()
+        logger.info("Open NetCDF with xarray: %.3fs", t1 - t0)
+        logger.info("Opened raster file: %s  vars=%s", temp_path, list(rds.data_vars))
         
-        # Assign CRS if not present (ERA5-Land is WGS84)
-        if not rds.rio.crs:
-            rds = rds.rio.write_crs("EPSG:4326")
+        # Assign CRS if not present (ERA5-Land is WGS84) so rio accessor works
+        rds = rds.rio.write_crs("EPSG:4326")
         
         return rds, temp_path
 
@@ -164,7 +173,7 @@ class RasterComputation:
         """Main entry point: compute raster stats for a district."""
         geometry = self.get_district_geometry(district_gid)
         
-        raster, temp_path = await self._load_monthly_raster(provider=provider, year=year, month=month, variable=None)
+        raster, temp_path = await self._load_monthly_raster(provider=provider, year=year, month=month, variable=variable)
         
         try:
             data = self._select_raster_variable(raster, variable)
@@ -186,10 +195,15 @@ class RasterComputation:
         year: int = 2024,
         month: int = 1,
     ) -> list[StateDistrictStatisticsItem]:
+        t_total = time.perf_counter()
+
+        t0 = time.perf_counter()
         adm2 = get_adm2()
         state_districts = adm2[adm2["GID_1"] == state_gid]
         if state_districts.empty:
             raise ValueError(f"State not found: {state_gid}")
+        t1 = time.perf_counter()
+        logger.info("Load/filter state district geometries: %.3fs", t1 - t0)
 
         raster, temp_path = await self._load_monthly_raster(provider=provider, year=year, month=month, variable=variable)
 
@@ -206,8 +220,10 @@ class RasterComputation:
 
             data = self._select_raster_variable(raster, variable)
 
+            t_comp_start = time.perf_counter()
             results: list[StateDistrictStatisticsItem] = []
             for idx in state_districts.index:
+                t_dist = time.perf_counter()
                 district_id = str(state_districts.at[idx, "GID_2"])
                 district_geometry = state_districts.loc[[idx]]
                 try:
@@ -223,6 +239,11 @@ class RasterComputation:
                 except Exception:
                     logger.exception("Failed computing stats for district %s in state %s", district_id, state_gid)
                     continue
+                t_dist_end = time.perf_counter()
+                logger.info("District %s: %.3fs", district_id, t_dist_end - t_dist)
+
+            t_comp_end = time.perf_counter()
+            logger.info("Compute statistics for all districts: %.3fs", t_comp_end - t_comp_start)
 
             logger.info(
                 "State %s: districts returned=%d computed=%d",
@@ -237,6 +258,9 @@ class RasterComputation:
                 logger.info("State %s: mean range min=%s max=%s", state_gid, min(means), max(means))
             else:
                 logger.info("State %s: mean range unavailable (no computed districts)", state_gid)
+
+            t_total_end = time.perf_counter()
+            logger.info("Total compute_for_state: %.3fs", t_total_end - t_total)
 
             return results
         finally:

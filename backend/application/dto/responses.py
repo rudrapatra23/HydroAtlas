@@ -2,24 +2,9 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import datetime
-from pathlib import Path
-from typing import Optional, Sequence
+from typing import Sequence
 
 from domain.entities.climate_asset import ClimateAssetStatus
-
-
-@dataclass
-class DownloadResponse:
-    success: bool
-    storage_key: Optional[str] = None
-    provider: Optional[str] = None
-    variable: Optional[str] = None
-    year: Optional[int] = None
-    month: Optional[int] = None
-    file_path: Optional[Path] = None
-    checksum: Optional[str] = None
-    file_size: Optional[int] = None
-    error_message: Optional[str] = None
 
 
 @dataclass

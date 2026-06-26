@@ -6,19 +6,9 @@ from fastapi import APIRouter, Depends, HTTPException, status
 
 from api.dependencies import get_dataset_service
 from application.dataset_service import DatasetService
-from application.dto.requests import DownloadRequest
-from application.dto.responses import ClimateAssetResponse, DownloadResponse
+from application.dto.responses import ClimateAssetResponse
 
 router = APIRouter(prefix="/datasets", tags=["datasets"])
-
-
-@router.post("/download", response_model=DownloadResponse)
-async def download_dataset(
-    request: DownloadRequest,
-    service: Annotated[DatasetService, Depends(get_dataset_service)],
-) -> DownloadResponse:
-    """Download and register a climate dataset."""
-    return await service.download_and_register(request)
 
 
 @router.get("", response_model=Sequence[ClimateAssetResponse])
@@ -50,7 +40,7 @@ async def delete_dataset(
     id: str,
     service: Annotated[DatasetService, Depends(get_dataset_service)],
 ) -> None:
-    """Delete a climate asset by ID."""
+    """Delete a climate asset record."""
     asset = await service.get_asset(id)
     if not asset:
         raise HTTPException(
