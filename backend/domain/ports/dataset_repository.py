@@ -16,7 +16,7 @@ class DatasetRepository(ABC):
         raise NotImplementedError
 
     @abstractmethod
-    def get_by_period(self, year: int, month: int, provider: str, variable: Optional[str] = None) -> ClimateAsset | None:
+    def get_by_period(self, year: int, month: int, provider: str, variable: str) -> ClimateAsset | None:
         raise NotImplementedError
 
     @abstractmethod
