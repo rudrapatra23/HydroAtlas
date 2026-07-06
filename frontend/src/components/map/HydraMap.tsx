@@ -56,6 +56,14 @@ function HydraMap() {
   const setSelectedDistrictId = useAppStore((state) => state.setSelectedDistrictId);
   const districtGeojsonRef = useRef<any | null>(null);
   const geojsonLoadedForStateRef = useRef<string | null>(null);
+  // Mirrors selectedStateId so the map-init effect (which runs exactly
+  // once and is intentionally NOT torn down on state changes — see
+  // H1.a in .kimchi/docs/race-diagnosis.md) can read the current value
+  // inside its click handler without being re-subscribed.
+  const selectedStateIdRef = useRef<string | null>(selectedStateId);
+  useEffect(() => {
+    selectedStateIdRef.current = selectedStateId;
+  }, [selectedStateId]);
 
   const [legendThresholds, setLegendThresholds] = useState<LegendThresholds | null>(null);
 
@@ -260,7 +268,10 @@ function HydraMap() {
       const districtId = feature?.properties?.district_id as string | undefined;
       const stateId = feature?.properties?.state_id as string | undefined;
       if (districtId && stateId) {
-        if (selectedStateId !== stateId) {
+        // Read the latest selectedStateId from the ref so this handler
+        // does not need the map-init effect to be re-subscribed on
+        // every state change.
+        if (selectedStateIdRef.current !== stateId) {
           setSelectedStateId(stateId);
           queueMicrotask(() => setSelectedDistrictId(districtId));
         } else {
@@ -273,7 +284,12 @@ function HydraMap() {
       map.remove();
       mapRef.current = null;
     };
-  }, [emptyFeatureCollection, selectedStateId, setSelectedDistrictId, setSelectedStateId]);
+    // Intentionally NOT depending on selectedStateId: the map instance
+    // is a long-lived resource and must NOT be torn down on every
+    // state change. The click handler reads selectedStateId via
+    // selectedStateIdRef, which is kept in sync by the small effect
+    // above. See H1.a in .kimchi/docs/race-diagnosis.md.
+  }, [emptyFeatureCollection, setSelectedDistrictId, setSelectedStateId]);
 
   useEffect(() => {
     const map = mapRef.current;

@@ -24,8 +24,8 @@ export type DistrictsGeojson = {
 
 const BASE_URL = import.meta.env.VITE_API_BASE_URL || "http://localhost:8000";
 
-async function getJson<T>(path: string): Promise<T> {
-  const response = await fetch(`${BASE_URL}${path}`);
+async function getJson<T>(path: string, signal?: AbortSignal): Promise<T> {
+  const response = await fetch(`${BASE_URL}${path}`, { signal });
   if (!response.ok) {
     throw new Error(`Request failed: ${response.status} ${response.statusText}`);
   }
@@ -99,9 +99,13 @@ export async function getStates(): Promise<StateResponseItem[]> {
   return getJson<StateResponseItem[]>("/boundaries/states");
 }
 
-export async function getDistricts(stateId: string): Promise<DistrictResponseItem[]> {
+export async function getDistricts(
+  stateId: string,
+  signal?: AbortSignal,
+): Promise<DistrictResponseItem[]> {
   return getJson<DistrictResponseItem[]>(
-    `/boundaries/states/${encodeURIComponent(stateId)}/districts`
+    `/boundaries/states/${encodeURIComponent(stateId)}/districts`,
+    signal,
   );
 }
 
@@ -120,6 +124,7 @@ export async function getDistrictsGeojson(stateId: string): Promise<DistrictsGeo
 export async function getDistrictRangeStatistics(
   districtId: string,
   body: RangeStatisticsRequestBody,
+  signal?: AbortSignal,
 ): Promise<DistrictStatistics> {
   const response = await fetch(
     `${BASE_URL}/districts/${encodeURIComponent(districtId)}/statistics`,
@@ -129,6 +134,7 @@ export async function getDistrictRangeStatistics(
         "Content-Type": "application/json",
       },
       body: JSON.stringify(body),
+      signal,
     }
   );
   if (!response.ok) {

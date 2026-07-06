@@ -1,0 +1,165 @@
+/**
+ * Regression test for H1.b (see .kimchi/docs/race-diagnosis.md).
+ *
+ * Before the fix, the DataExplorer district-fetch effect had no
+ * cancellation guard and no AbortController. Rapid state changes
+ * S1 -> S2 -> S3 raced; whichever fetch resolved LAST won the
+ * `setDistricts` call, so the dropdown could show districts of a
+ * state the user no longer viewed.
+ *
+ * After the fix, each effect run creates an AbortController and an
+ * identity guard compares the captured stateId against the store's
+ * current selectedStateId before committing. A late-arriving response
+ * for an older state is discarded even if the abort arrived after the
+ * response body was parsed.
+ */
+import { describe, it, expect, vi, beforeEach } from "vitest";
+import { render, act, waitFor } from "@testing-library/react";
+import { useAppStore } from "../../stores/useAppStore";
+
+// In-memory controllable promises per state id.
+type Pending = {
+  promise: Promise<any>;
+  resolve: (value: any) => void;
+  reject: (error: any) => void;
+};
+const pendingByState = new Map<string, Pending>();
+
+vi.mock("../../api/boundaries", () => ({
+  getStates: vi.fn().mockResolvedValue([]),
+  getDatasets: vi.fn().mockResolvedValue([]),
+  getDistricts: vi.fn((stateId: string, _signal?: AbortSignal) => {
+    let resolve!: (v: any) => void;
+    let reject!: (e: any) => void;
+    const promise = new Promise<any>((res, rej) => {
+      resolve = res;
+      reject = rej;
+    });
+    pendingByState.set(stateId, { promise, resolve, reject });
+    // If the test attaches a signal, abort should reject.
+    if (_signal) {
+      _signal.addEventListener("abort", () => {
+        const e = new DOMException("Aborted", "AbortError");
+        // Only reject if still pending.
+        if (pendingByState.get(stateId)?.promise === promise) {
+          reject(e);
+        }
+      });
+    }
+    return promise;
+  }),
+  getDistrictsGeojson: vi.fn().mockResolvedValue({ type: "FeatureCollection", features: [] }),
+  getDistrictRangeStatistics: vi.fn(),
+  getStateDistrictRangeStatistics: vi.fn(),
+  getDistrictMonthlySeries: vi.fn(),
+}));
+
+import DataExplorer from "./DataExplorer";
+import { getDistricts } from "../../api/boundaries";
+
+const mockedGetDistricts = getDistricts as unknown as ReturnType<typeof vi.fn>;
+
+beforeEach(() => {
+  pendingByState.clear();
+  mockedGetDistricts.mockClear();
+  useAppStore.setState({
+    selectedStateId: null,
+    selectedDistrictId: null,
+    startMonth: "",
+    endMonth: "",
+    availableRange: null,
+    states: [
+      { id: "S1", name: "State One" },
+      { id: "S2", name: "State Two" },
+      { id: "S3", name: "State Three" },
+    ],
+    districts: [],
+  });
+});
+
+describe("DataExplorer — H1.b district-fetch race fix", () => {
+  it("commits only the latest selected state, even if S1 resolves after S2", async () => {
+    render(<DataExplorer />);
+
+    // Start with S1 (slow).
+    await act(async () => {
+      useAppStore.getState().setSelectedStateId("S1");
+    });
+    // The fetch for S1 must have been issued.
+    expect(pendingByState.has("S1")).toBe(true);
+
+    // Switch to S2 before S1 resolves.
+    await act(async () => {
+      useAppStore.getState().setSelectedStateId("S2");
+    });
+    expect(pendingByState.has("S2")).toBe(true);
+
+    // S2 resolves fast with its districts.
+    await act(async () => {
+      pendingByState.get("S2")!.resolve([
+        { district_id: "S2-D1", name: "S2 District One" },
+        { district_id: "S2-D2", name: "S2 District Two" },
+      ]);
+    });
+
+    await waitFor(() => {
+      expect(useAppStore.getState().districts).toEqual([
+        { id: "S2-D1", name: "S2 District One" },
+        { id: "S2-D2", name: "S2 District Two" },
+      ]);
+    });
+
+    // Now S1 resolves late. This MUST NOT overwrite the dropdown.
+    await act(async () => {
+      pendingByState.get("S1")!.resolve([
+        { district_id: "S1-D1", name: "S1 District One" },
+      ]);
+    });
+
+    // Give the (now stale) promise a chance to commit if it could.
+    await new Promise((r) => setTimeout(r, 10));
+
+    expect(useAppStore.getState().districts).toEqual([
+      { id: "S2-D1", name: "S2 District One" },
+      { id: "S2-D2", name: "S2 District Two" },
+    ]);
+  });
+
+  it("aborts the previous fetch when the state changes", async () => {
+    const abortSignals: AbortSignal[] = [];
+
+    // Wrap the mock to capture signals.
+    mockedGetDistricts.mockImplementation((stateId: string, signal?: AbortSignal) => {
+      let resolve!: (v: any) => void;
+      let reject!: (e: any) => void;
+      const promise = new Promise<any>((res, rej) => {
+        resolve = res;
+        reject = rej;
+      });
+      pendingByState.set(stateId, { promise, resolve, reject });
+      if (signal) abortSignals.push(signal);
+      return promise;
+    });
+
+    render(<DataExplorer />);
+
+    await act(async () => {
+      useAppStore.getState().setSelectedStateId("S1");
+    });
+    await act(async () => {
+      useAppStore.getState().setSelectedStateId("S2");
+    });
+    await act(async () => {
+      useAppStore.getState().setSelectedStateId("S3");
+    });
+
+    // S1's and S2's signals must be aborted by the time S3 was issued.
+    // The exact assertion is that at least the S1 signal was aborted;
+    // aborting happens synchronously in the cleanup.
+    await waitFor(() => {
+      const s1Signal = abortSignals[0];
+      expect(s1Signal.aborted).toBe(true);
+    });
+    expect(abortSignals.length).toBeGreaterThanOrEqual(3);
+  });
+});

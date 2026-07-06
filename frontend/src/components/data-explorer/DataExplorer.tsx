@@ -101,21 +101,50 @@ function DataExplorer() {
   }, []);
 
   // Fetch districts when selected state changes.
+  //
+  // Cancellation contract (see H1.b in .kimchi/docs/race-diagnosis.md):
+  // rapid state changes S1 -> S2 -> S3 used to leave the dropdown
+  // showing whichever state's districts resolved LAST, not the user's
+  // CURRENTLY selected state. We now defend with two layers:
+  //   1. AbortController — the in-flight fetch is cancelled at the
+  //      network layer the moment the next effect run starts.
+  //   2. Identity guard — after the await resolves we compare the
+  //      captured stateId to the latest selectedStateId from the
+  //      store. If they differ we discard the result, so an abort
+  //      that arrived too late can never poison the dropdown.
   useEffect(() => {
     if (!selectedStateId) {
       setDistricts([]);
       return;
     }
     const stateId = selectedStateId;
+    const ac = new AbortController();
+    let cancelled = false;
+
     async function fetchDistricts() {
       try {
-        const data = await getDistricts(stateId);
-        setDistricts(data.map((item: any) => ({ id: item.district_id, name: item.name })));
+        const data = await getDistricts(stateId, ac.signal);
+        if (cancelled) return;
+        // Identity guard: abort can arrive after the await resolves;
+        // the store may already reflect a newer selection.
+        const current = useAppStore.getState().selectedStateId;
+        if (current !== stateId) return;
+        setDistricts(
+          data.map((item: any) => ({ id: item.district_id, name: item.name })),
+        );
       } catch (error) {
+        if (cancelled) return;
+        if (error instanceof DOMException && error.name === "AbortError") return;
+        if (error instanceof Error && /AbortError/i.test(error.message)) return;
         console.error("Failed to fetch districts:", error);
       }
     }
     fetchDistricts();
+
+    return () => {
+      cancelled = true;
+      ac.abort();
+    };
   }, [selectedStateId, setDistricts]);
 
   // Parse current month strings into {year, month} tuples. Memoised
