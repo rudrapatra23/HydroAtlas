@@ -12,7 +12,7 @@ WORKDIR /app
 
 # ── Install OS-level dependencies required by some Python packages ────
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends gcc libpq-dev && \
+    apt-get install -y --no-install-recommends gcc libpq-dev libexpat1 && \
     rm -rf /var/lib/apt/lists/*
 
 # ── Install Python dependencies ──────────────────────────────────────

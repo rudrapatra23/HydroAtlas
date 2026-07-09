@@ -307,6 +307,78 @@ class Downloader:
         )
         return saved
 
+    async def repair_registered_asset(
+        self,
+        *,
+        asset: ClimateAsset,
+        repository: DatasetRepository,
+    ) -> DatasetHandle:
+        """Restore a PostgreSQL-known asset whose S3 object is missing.
+
+        Repair order:
+          1. Re-upload from the local per-variable cache when the cache
+             file still exists and matches the row checksum.
+          2. Otherwise re-fetch from CDS and overwrite the existing row
+             in place using the same ``(provider, variable, year, month)``.
+
+        The existing downloader pipeline remains the only implementation
+        of CDS request construction, ZIP normalization, splitting, S3
+        upload, and checksum persistence.
+        """
+        if self._storage_port is None:
+            raise RuntimeError("StoragePort is not configured")
+
+        cache_path = self._files.cache_path_for(
+            asset.provider, asset.variable, asset.year, asset.month
+        )
+        self._files.ensure_cache_dir(
+            asset.provider, asset.variable, asset.year, asset.month
+        )
+        if cache_path.exists():
+            checksum = await asyncio.to_thread(sha256_file, cache_path)
+            if checksum == asset.checksum:
+                await asyncio.to_thread(
+                    self._storage_port.upload, asset.storage_key, cache_path
+                )
+                return DatasetHandle(
+                    local_path=cache_path,
+                    storage_key=asset.storage_key,
+                    checksum=checksum,
+                    file_size=cache_path.stat().st_size,
+                    cache_hit=True,
+                    timings_ms={},
+                )
+            self._logger.warning(
+                "Local cache checksum drift during repair for %s/%s/%04d-%02d; "
+                "falling back to CDS re-fetch",
+                asset.provider,
+                asset.variable,
+                asset.year,
+                asset.month,
+            )
+
+        timer = PhaseTimer()
+        timer.start_total()
+        handle = await self._fetch_from_era5(
+            provider=asset.provider,
+            variable=asset.variable,
+            year=asset.year,
+            month=asset.month,
+            repository=repository,
+            timer=timer,
+            existing_asset=asset,
+        )
+        self._emit_summary(
+            timer=timer,
+            provider=asset.provider,
+            variable=asset.variable,
+            year=asset.year,
+            month=asset.month,
+            cache_hit=False,
+            source="era5",
+        )
+        return handle
+
     # ── Internal: cache / S3 path
 
     async def _serve_from_cache_or_s3(
@@ -390,6 +462,7 @@ class Downloader:
         month: int,
         repository: DatasetRepository,
         timer: PhaseTimer,
+        existing_asset: ClimateAsset | None = None,
     ) -> DatasetHandle:
         """CDS download + split + cache + upload + register for a single
         ``(provider, variable, year, month)``.
@@ -460,7 +533,7 @@ class Downloader:
 
         now = datetime.now(timezone.utc)
         asset = ClimateAsset(
-            id=None,
+            id=existing_asset.id if existing_asset is not None else None,
             provider=provider,
             variable=variable,
             year=year,
@@ -469,7 +542,7 @@ class Downloader:
             checksum=checksum,
             file_size=file_size,
             status=ClimateAssetStatus.COMPLETED,
-            created_at=now,
+            created_at=existing_asset.created_at if existing_asset is not None else now,
             updated_at=now,
         )
         await repository.save(asset)

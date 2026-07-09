@@ -48,6 +48,7 @@ from domain.ports.dataset_repository import DatasetRepository
 from ingestion.era5.downloader import DatasetHandle, Downloader
 from ingestion.era5.file_service import FileService
 from ingestion.era5.locks import lock_registry
+from ingestion.era5.scheduler import Era5SyncService
 from ingestion.era5.splitter import DEFAULT_ERA5_VARIABLES, DatasetSplitter, VARIABLE_CATEGORY
 
 from application.precompute_service import PrecomputeService
@@ -296,6 +297,21 @@ def cmd_backfill(args: argparse.Namespace) -> int:
         )
     )
     return 0
+
+
+def cmd_sync(args: argparse.Namespace) -> int:
+    settings = get_settings()
+    logger = _setup_logging(settings)
+    service = Era5SyncService(settings=settings)
+    results = asyncio.run(service.sync_once())
+    failed = sum(1 for r in results if r.action == "failed")
+    logger.info(
+        "Sync complete total=%d failed=%d history_years=%d",
+        len(results),
+        failed,
+        settings.era5_history_years,
+    )
+    return 1 if failed else 0
 
 
 async def _fetch_status_rows(
@@ -664,6 +680,15 @@ def build_parser() -> argparse.ArgumentParser:
         help="Restrict to a single logical variable (default: all categories)",
     )
     p_bf.set_defaults(func=cmd_backfill)
+
+    p_sy = sub.add_parser(
+        "sync",
+        help=(
+            "Ensure the rolling ERA5 history window exists in the current "
+            "bucket using PostgreSQL + S3 reconciliation"
+        ),
+    )
+    p_sy.set_defaults(func=cmd_sync)
 
     p_st = sub.add_parser(
         "status",

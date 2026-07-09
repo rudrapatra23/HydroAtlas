@@ -48,23 +48,50 @@ class PostgresDatasetRepository(DatasetRepository):
         self.session = session
 
     async def save(self, asset: ClimateAsset) -> ClimateAsset:
-        if asset.id is None:
-            asset = ClimateAsset(
-                id=str(uuid.uuid4()),
-                provider=asset.provider,
-                variable=asset.variable,
-                year=asset.year,
-                month=asset.month,
-                storage_key=asset.storage_key,
-                checksum=asset.checksum,
-                file_size=asset.file_size,
-                status=asset.status,
-                created_at=asset.created_at,
-                updated_at=asset.updated_at,
+        model: ClimateAssetModel | None = None
+        if asset.id is not None:
+            stmt = select(ClimateAssetModel).where(ClimateAssetModel.id == asset.id)
+            result = await self.session.execute(stmt)
+            model = result.scalar_one_or_none()
+        if model is None:
+            stmt = select(ClimateAssetModel).where(
+                ClimateAssetModel.provider == asset.provider,
+                ClimateAssetModel.variable == asset.variable,
+                ClimateAssetModel.year == asset.year,
+                ClimateAssetModel.month == asset.month,
             )
+            result = await self.session.execute(stmt)
+            model = result.scalar_one_or_none()
 
-        model = _from_domain(asset)
-        self.session.add(model)
+        if model is None:
+            if asset.id is None:
+                asset = ClimateAsset(
+                    id=str(uuid.uuid4()),
+                    provider=asset.provider,
+                    variable=asset.variable,
+                    year=asset.year,
+                    month=asset.month,
+                    storage_key=asset.storage_key,
+                    checksum=asset.checksum,
+                    file_size=asset.file_size,
+                    status=asset.status,
+                    created_at=asset.created_at,
+                    updated_at=asset.updated_at,
+                )
+            model = _from_domain(asset)
+            self.session.add(model)
+        else:
+            model.provider = asset.provider
+            model.variable = asset.variable
+            model.year = asset.year
+            model.month = asset.month
+            model.storage_key = asset.storage_key
+            model.checksum = asset.checksum
+            model.file_size = asset.file_size
+            model.status = asset.status
+            model.created_at = asset.created_at
+            model.updated_at = asset.updated_at
+
         await self.session.commit()
         await self.session.refresh(model)
         return _to_domain(model)

@@ -59,6 +59,10 @@ class Settings(BaseSettings):
     era5_retry_attempts: int = Field(default=5)
     era5_retry_base_seconds: float = Field(default=2.0)
     era5_bootstrap_months: int = Field(default=24)
+    era5_history_years: int = Field(default=10)
+    era5_sync_concurrency: int = Field(default=4)
+    era5_scheduler_timezone: str = Field(default="UTC")
+    era5_scheduler_run_once: bool = Field(default=False)
 
     # ── District-level raster clipping (backend/district_clip/)
     # Bbox padding in degrees added to the district polygon before the
