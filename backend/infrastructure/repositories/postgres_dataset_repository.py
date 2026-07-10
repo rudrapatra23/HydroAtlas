@@ -1,14 +1,18 @@
 from __future__ import annotations
 
+import logging
 import uuid
 from typing import Optional, Sequence
 
 from sqlalchemy import func, select, tuple_
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from domain.entities.climate_asset import ClimateAsset, ClimateAssetStatus
 from domain.ports.dataset_repository import DatasetRepository
 from infrastructure.db.climate_asset_model import ClimateAssetModel
+
+logger = logging.getLogger("uvicorn.error")
 
 
 def _to_domain(model: ClimateAssetModel) -> ClimateAsset:
@@ -48,52 +52,40 @@ class PostgresDatasetRepository(DatasetRepository):
         self.session = session
 
     async def save(self, asset: ClimateAsset) -> ClimateAsset:
-        model: ClimateAssetModel | None = None
-        if asset.id is not None:
-            stmt = select(ClimateAssetModel).where(ClimateAssetModel.id == asset.id)
-            result = await self.session.execute(stmt)
-            model = result.scalar_one_or_none()
-        if model is None:
-            stmt = select(ClimateAssetModel).where(
-                ClimateAssetModel.provider == asset.provider,
-                ClimateAssetModel.variable == asset.variable,
-                ClimateAssetModel.year == asset.year,
-                ClimateAssetModel.month == asset.month,
-            )
-            result = await self.session.execute(stmt)
-            model = result.scalar_one_or_none()
-
-        if model is None:
-            if asset.id is None:
-                asset = ClimateAsset(
-                    id=str(uuid.uuid4()),
-                    provider=asset.provider,
-                    variable=asset.variable,
-                    year=asset.year,
-                    month=asset.month,
-                    storage_key=asset.storage_key,
-                    checksum=asset.checksum,
-                    file_size=asset.file_size,
-                    status=asset.status,
-                    created_at=asset.created_at,
-                    updated_at=asset.updated_at,
-                )
-            model = _from_domain(asset)
-            self.session.add(model)
-        else:
-            model.provider = asset.provider
-            model.variable = asset.variable
-            model.year = asset.year
-            model.month = asset.month
-            model.storage_key = asset.storage_key
-            model.checksum = asset.checksum
-            model.file_size = asset.file_size
-            model.status = asset.status
-            model.created_at = asset.created_at
-            model.updated_at = asset.updated_at
-
+        asset_id = asset.id or str(uuid.uuid4())
+        payload = {
+            "id": asset_id,
+            "provider": asset.provider,
+            "variable": asset.variable,
+            "year": asset.year,
+            "month": asset.month,
+            "storage_key": asset.storage_key,
+            "checksum": asset.checksum,
+            "file_size": asset.file_size,
+            "status": asset.status,
+            "created_at": asset.created_at,
+            "updated_at": asset.updated_at,
+        }
+        stmt = pg_insert(ClimateAssetModel).values(payload)
+        stmt = stmt.on_conflict_do_update(
+            constraint="uq_climate_assets_provider_variable_year_month",
+            set_={
+                "storage_key": stmt.excluded.storage_key,
+                "checksum": stmt.excluded.checksum,
+                "file_size": stmt.excluded.file_size,
+                "status": stmt.excluded.status,
+                "created_at": stmt.excluded.created_at,
+                "updated_at": stmt.excluded.updated_at,
+            },
+        ).returning(ClimateAssetModel.id)
+        result = await self.session.execute(stmt)
         await self.session.commit()
-        await self.session.refresh(model)
+        asset_id = result.scalar_one()
+        model = await self.session.get(ClimateAssetModel, asset_id)
+        if model is None:
+            raise RuntimeError(
+                f"Upserted climate asset {asset_id} but failed to reload it"
+            )
         return _to_domain(model)
 
     async def get_by_id(self, asset_id: str) -> ClimateAsset | None:
@@ -105,17 +97,33 @@ class PostgresDatasetRepository(DatasetRepository):
         return _to_domain(model)
 
     async def get_by_period(self, year: int, month: int, provider: str, variable: str) -> ClimateAsset | None:
-        stmt = select(ClimateAssetModel).where(
-            ClimateAssetModel.provider == provider,
-            ClimateAssetModel.variable == variable,
-            ClimateAssetModel.year == year,
-            ClimateAssetModel.month == month,
+        stmt = (
+            select(ClimateAssetModel)
+            .where(
+                ClimateAssetModel.provider == provider,
+                ClimateAssetModel.variable == variable,
+                ClimateAssetModel.year == year,
+                ClimateAssetModel.month == month,
+            )
+            .order_by(
+                ClimateAssetModel.created_at.desc(),
+                ClimateAssetModel.id.desc(),
+            )
+            .limit(2)
         )
         result = await self.session.execute(stmt)
-        model = result.scalar_one_or_none()
-        if model is None:
+        models = result.scalars().all()
+        if not models:
             return None
-        return _to_domain(model)
+        if len(models) > 1:
+            logger.warning(
+                "climate_assets duplicate rows found for provider=%s variable=%s year=%04d month=%02d; using latest created_at row",
+                provider,
+                variable,
+                year,
+                month,
+            )
+        return _to_domain(models[0])
 
     async def list_by_period_range(
         self,
@@ -141,11 +149,37 @@ class PostgresDatasetRepository(DatasetRepository):
                 period_column >= (start_year, start_month),
                 period_column <= (end_year, end_month),
             )
-            .order_by(ClimateAssetModel.year.asc(), ClimateAssetModel.month.asc())
+            .order_by(
+                ClimateAssetModel.year.asc(),
+                ClimateAssetModel.month.asc(),
+                ClimateAssetModel.created_at.desc(),
+                ClimateAssetModel.id.desc(),
+            )
         )
         result = await self.session.execute(stmt)
         models = result.scalars().all()
-        return [_to_domain(m) for m in models]
+        deduped: list[ClimateAssetModel] = []
+        seen_periods: set[tuple[int, int]] = set()
+        dropped_duplicates = 0
+        for model in models:
+            period = (model.year, model.month)
+            if period in seen_periods:
+                dropped_duplicates += 1
+                continue
+            seen_periods.add(period)
+            deduped.append(model)
+        if dropped_duplicates:
+            logger.warning(
+                "climate_assets duplicate rows found for provider=%s variable=%s range=%04d-%02d..%04d-%02d; dropped %d stale rows",
+                provider,
+                variable,
+                start_year,
+                start_month,
+                end_year,
+                end_month,
+                dropped_duplicates,
+            )
+        return [_to_domain(m) for m in deduped]
 
     async def list(self) -> Sequence[ClimateAsset]:
         stmt = select(ClimateAssetModel).order_by(ClimateAssetModel.created_at.desc())
@@ -208,11 +242,15 @@ class PostgresDatasetRepository(DatasetRepository):
             await self.session.commit()
 
     async def exists(self, provider: str, variable: str, year: int, month: int) -> bool:
-        stmt = select(ClimateAssetModel.id).where(
-            ClimateAssetModel.provider == provider,
-            ClimateAssetModel.variable == variable,
-            ClimateAssetModel.year == year,
-            ClimateAssetModel.month == month,
+        stmt = (
+            select(ClimateAssetModel.id)
+            .where(
+                ClimateAssetModel.provider == provider,
+                ClimateAssetModel.variable == variable,
+                ClimateAssetModel.year == year,
+                ClimateAssetModel.month == month,
+            )
+            .limit(1)
         )
         result = await self.session.execute(stmt)
-        return result.scalar_one_or_none() is not None
+        return result.scalar() is not None

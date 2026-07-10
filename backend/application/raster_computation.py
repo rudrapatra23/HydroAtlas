@@ -323,7 +323,7 @@ class RasterComputation:
                         "DATASET_CLOSE_BEGIN request_id=%s key=%s",
                         get_request_id(), handle.lease._key,
                     )
-                    handle.close()
+                    await handle.aclose()
                     logger.info(
                         "DATASET_CLOSE_DONE request_id=%s key=%s",
                         get_request_id(), handle.lease._key,
@@ -408,7 +408,7 @@ class RasterComputation:
                 )
             finally:
                 if handle is not None:
-                    handle.close()
+                    await handle.aclose()
 
         return points
 
@@ -431,7 +431,7 @@ class RasterComputation:
             data = self._select_raster_variable(raster, variable)
             return self._compute_stats_for_geometry(data, geometry)
         finally:
-            handle.close()
+            await handle.aclose()
 
     async def compute_for_state(
         self,
@@ -512,7 +512,7 @@ class RasterComputation:
 
             return results
         finally:
-            handle.close()
+            await handle.aclose()
 
     async def compute_for_district_range(
         self,
@@ -653,7 +653,7 @@ class RasterComputation:
                 )
             finally:
                 if handle is not None:
-                    handle.close()
+                    await handle.aclose()
 
         # Reduce across months: per-district mean / min-of-mins / max-of-maxes.
         all_district_ids: set[str] = set()

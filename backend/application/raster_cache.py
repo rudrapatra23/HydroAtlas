@@ -172,8 +172,8 @@ class OpenRasterHandle:
         """
         _register_handle(self)
 
-    def close(self) -> None:
-        """Close the dataset and release the lease. Idempotent.
+    async def aclose(self) -> None:
+        """Close the dataset and release the lease under the per-key I/O lock.
 
         Order matters: dataset.close() FIRST (so the netCDF file
         handle is dropped before the lease is released), then
@@ -184,6 +184,58 @@ class OpenRasterHandle:
         correlate an open with its corresponding close and detect
         leaked handles (an open without a matching close is a leak).
         """
+        key = self.lease._key
+        lock = _dataset_io_lock_registry.get_or_create(key)
+        await lock.acquire()
+        try:
+            if self._closed:
+                return
+            self._closed = True
+            emit_native_event(
+                "NATIVE_CLOSE_BEGIN",
+                file_path=self.path, cache_key=key,
+            )
+            try:
+                self.dataset.close()
+            except Exception as exc:  # noqa: BLE001
+                emit_native_event(
+                    "NATIVE_CLOSE_ERROR",
+                    file_path=self.path, cache_key=key,
+                    extra={
+                        "exception_type": type(exc).__name__,
+                        "exception_message": str(exc),
+                    },
+                )
+                safe_log(
+                    logging.WARNING,
+                    "DATASET_CLOSE key=%s path=%s request_id=%s status=dataset_close_failed error=%s",
+                    key, self.path, get_request_id(), exc,
+                )
+            else:
+                emit_native_event(
+                    "NATIVE_CLOSE_DONE",
+                    file_path=self.path, cache_key=key,
+                )
+                safe_log(
+                    logging.INFO,
+                    "DATASET_CLOSE key=%s path=%s request_id=%s status=ok",
+                    key, self.path, get_request_id(),
+                )
+            try:
+                self.lease.release()
+            except Exception as exc:  # noqa: BLE001
+                safe_log(
+                    logging.WARNING,
+                    "DATASET_CLOSE key=%s path=%s request_id=%s status=lease_release_failed error=%s",
+                    key, self.path, get_request_id(), exc,
+                )
+            finally:
+                _unregister_handle(self)
+        finally:
+            lock.release()
+
+    def close(self) -> None:
+        """Best-effort synchronous fallback for non-async call sites."""
         if self._closed:
             return
         self._closed = True
@@ -204,7 +256,7 @@ class OpenRasterHandle:
             )
             safe_log(
                 logging.WARNING,
-                "DATASET_CLOSE key=%s path=%s request_id=%s status=dataset_close_failed error=%s",
+                "DATASET_CLOSE key=%s path=%s request_id=%s status=dataset_close_failed_sync error=%s",
                 self.lease._key, self.path, get_request_id(), exc,
             )
         else:
@@ -214,7 +266,7 @@ class OpenRasterHandle:
             )
             safe_log(
                 logging.INFO,
-                "DATASET_CLOSE key=%s path=%s request_id=%s status=ok",
+                "DATASET_CLOSE key=%s path=%s request_id=%s status=ok_sync",
                 self.lease._key, self.path, get_request_id(),
             )
         try:
@@ -222,7 +274,7 @@ class OpenRasterHandle:
         except Exception as exc:  # noqa: BLE001
             safe_log(
                 logging.WARNING,
-                "DATASET_CLOSE key=%s path=%s request_id=%s status=lease_release_failed error=%s",
+                "DATASET_CLOSE key=%s path=%s request_id=%s status=lease_release_failed_sync error=%s",
                 self.lease._key, self.path, get_request_id(), exc,
             )
         finally:
@@ -237,7 +289,7 @@ class OpenRasterHandle:
         exc: BaseException | None,
         tb: TracebackType | None,
     ) -> None:
-        self.close()
+        await self.aclose()
 
     def __enter__(self) -> "OpenRasterHandle":
         return self
@@ -432,12 +484,12 @@ def _current_loop_id() -> int:
         return 0
 
 
-# Per-key open lock registry, separate from the download lock so that
-# concurrent cache-hit requests still serialise per file (the download
-# lock is only taken on the slow path). The registry is bounded with
-# the same LRU discipline as the download lock so memory cannot grow
-# without bound across long-running processes that cycle event loops.
-_open_lock_registry = _LockRegistry()
+# Per-key dataset I/O lock registry, separate from the download lock so that
+# concurrent cache-hit requests still serialise open/close per file (the
+# download lock is only taken on the slow path). The registry is bounded with
+# the same LRU discipline as the download lock so memory cannot grow without
+# bound across long-running processes that cycle event loops.
+_dataset_io_lock_registry = _LockRegistry()
 
 
 class _OpenCounter:
@@ -883,7 +935,7 @@ class RasterCache:
         log_key = asset.storage_key if asset is not None else str(lease.path)
         active_before = _open_counter.current(key)
         t_wait_start = time.perf_counter()
-        lock = _open_lock_registry.get_or_create(key)
+        lock = _dataset_io_lock_registry.get_or_create(key)
         try:
             await lock.acquire()
         except asyncio.CancelledError:

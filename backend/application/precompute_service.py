@@ -31,7 +31,6 @@ import tracemalloc
 from typing import Sequence
 
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-import xarray as xr
 
 from application.raster_cache import OpenRasterHandle, RasterCache
 from application.raster_computation import RasterComputation
@@ -155,7 +154,7 @@ class PrecomputeService:
         try:
             # 3. Open the dataset once, assign CRS, select the variable.
             t_open_start = time.perf_counter()
-            rds = xr.open_dataset(cache_path, engine="netcdf4")
+            rds = await self._raster_cache.open_dataset(acquired, asset=asset)
             rds = rds.rio.write_crs("EPSG:4326")
             handle = OpenRasterHandle(
                 dataset=rds, path=cache_path, lease=acquired,
@@ -232,7 +231,7 @@ class PrecomputeService:
             # re-closes the already-closed dataset. This is the
             # atomic release path for runtime resource ownership.
             if handle is not None:
-                handle.close()
+                await handle.aclose()
 
         # 5. Bulk upsert in batches so a long-running precompute does
         # not lose all its work if the process is killed mid-loop.

@@ -1,4 +1,4 @@
-import { useAppStore, BottomTab, Variable, LayerKey } from "../../stores/useAppStore";
+import { useAppStore, BottomTab, LayerKey } from "../../stores/useAppStore";
 import {
   Chart as ChartJS,
   CategoryScale,
@@ -54,19 +54,11 @@ const VARIABLE_CONFIGS: VariableConfig[] = [
   { variable: "surface_runoff", layerKey: "runoff", label: "Runoff", color: "#EA580C", icon: "waves", unit: getDisplayUnit("surface_runoff") },
 ];
 
-
 const CANONICAL_VARIABLES: readonly CanonicalVariable[] = [
   "precipitation",
   "soil_moisture",
   "surface_runoff",
 ];
-
-
-// const VARIABLE_TO_LAYER: Record<CanonicalVariable, LayerKey> = {
-//   precipitation: "rainfall",
-//   soil_moisture: "soil-moisture",
-//   surface_runoff: "runoff",
-// };
 
 type SeriesByVariable = Record<CanonicalVariable, MonthlySeriesPoint[]>;
 
@@ -82,6 +74,33 @@ function formatMonthLabel(point: MonthlySeriesPoint): string {
     "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
   ];
   return `${monthNames[point.month - 1]} ${point.year}`;
+}
+
+// Picks which x-axis tick indices to render, guaranteeing no two shown
+// ticks render identical text (e.g. two "Jan 2026" labels in a row).
+// Chart.js's built-in autoSkip/maxTicksLimit skips by index, not by
+// label content, so it can't make this guarantee on its own.
+function computeTickIndices(labels: string[], maxTicks = 8): Set<number> {
+  if (labels.length === 0) return new Set();
+
+  const uniqueIndices: number[] = [];
+  let lastLabel: string | null = null;
+  labels.forEach((label, i) => {
+    if (label !== lastLabel) {
+      uniqueIndices.push(i);
+      lastLabel = label;
+    }
+  });
+
+  if (uniqueIndices.length <= maxTicks) return new Set(uniqueIndices);
+
+  const step = Math.ceil(uniqueIndices.length / maxTicks);
+  const picked = uniqueIndices.filter((_, i) => i % step === 0);
+
+  const lastIdx = uniqueIndices[uniqueIndices.length - 1];
+  if (!picked.includes(lastIdx)) picked.push(lastIdx);
+
+  return new Set(picked);
 }
 
 function linearRegression(points: MonthlySeriesPoint[]): { slope: number; intercept: number } | null {
@@ -100,7 +119,7 @@ function linearRegression(points: MonthlySeriesPoint[]): { slope: number; interc
   return { slope, intercept };
 }
 
-function buildChartOptions(visibleConfigs?: VariableConfig[]) {
+function buildChartOptions(visibleConfigs?: VariableConfig[], labels: string[] = []) {
   // When `visibleConfigs` is supplied the chart uses two independent
   // y-axes so Soil Moisture (~7–18 mm equivalent water depth) does not
   // flatten Rainfall/Runoff (~0.1–200 mm) to a near-zero line. The trend
@@ -115,12 +134,18 @@ function buildChartOptions(visibleConfigs?: VariableConfig[]) {
       )
     : true;
 
+  const tickIndices = computeTickIndices(labels);
+
   const scales: Record<string, any> = {
     x: {
       grid: { display: false },
       ticks: {
-        maxTicksLimit: 8,
+        autoSkip: false,
+        maxRotation: 0,
+        minRotation: 0,
         font: { family: "Inter, sans-serif" },
+        callback: (_value: string | number, index: number) =>
+          tickIndices.has(index) ? labels[index] : "",
       },
     },
   };
@@ -309,7 +334,7 @@ function computeSeriesStats(points: MonthlySeriesPoint[]) {
 function TimeSeriesTab({ chart, visibleConfigs }: { chart: any; visibleConfigs: VariableConfig[] }) {
   return (
     <div className="min-h-[16rem] mt-4">
-      <Line data={chart} options={buildChartOptions(visibleConfigs)} />
+      <Line data={chart} options={buildChartOptions(visibleConfigs, chart.labels)} />
     </div>
   );
 }
@@ -317,7 +342,7 @@ function TimeSeriesTab({ chart, visibleConfigs }: { chart: any; visibleConfigs: 
 function TrendTab({ chart }: { chart: any }) {
   return (
     <div className="min-h-[16rem] mt-4">
-      <Line data={chart} options={buildChartOptions()} />
+      <Line data={chart} options={buildChartOptions(undefined, chart.labels)} />
     </div>
   );
 }

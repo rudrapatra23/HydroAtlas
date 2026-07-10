@@ -1,7 +1,7 @@
 from datetime import datetime
 from typing import Any
 
-from sqlalchemy import Column, DateTime, Enum, Integer, String
+from sqlalchemy import Column, DateTime, Enum, Integer, String, UniqueConstraint
 from sqlalchemy.orm import declarative_base, Mapped, mapped_column
 
 from domain.entities.climate_asset import ClimateAssetStatus
@@ -11,6 +11,15 @@ Base = declarative_base()
 
 class ClimateAssetModel(Base):
     __tablename__ = "climate_assets"
+    __table_args__ = (
+        UniqueConstraint(
+            "provider",
+            "variable",
+            "year",
+            "month",
+            name="uq_climate_assets_provider_variable_year_month",
+        ),
+    )
 
     id: Mapped[str] = mapped_column(String, primary_key=True)
     provider: Mapped[str] = mapped_column(String, nullable=False, index=True)

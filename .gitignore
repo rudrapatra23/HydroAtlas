@@ -74,5 +74,3 @@ backend/diff.txt
 
 # Local tests and verification artifacts
 backend/tests/
-
-/docker-compose.yml
