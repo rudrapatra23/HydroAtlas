@@ -30,10 +30,10 @@ class Settings(BaseSettings):
 
     # ── AWS / S3
     aws_region: str = Field(...)
-    aws_access_key_id: str = Field(...)
-    aws_secret_access_key: str = Field(...)
+    aws_access_key_id: Optional[str] = Field(default=None)
+    aws_secret_access_key: Optional[str] = Field(default=None)
     s3_bucket_name: str = Field(...)
-    s3_endpoint_url: str = Field(...)
+    s3_endpoint_url: Optional[str] = Field(default=None)
 
     # ── Database
     database_url: str = Field(...)
