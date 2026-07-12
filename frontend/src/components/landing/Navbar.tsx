@@ -1,4 +1,4 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef, useCallback } from "react";
 import { Link, useLocation } from "react-router-dom";
 
 const NAV_LINKS = [
@@ -43,11 +43,20 @@ function MobileMenu({
   onClose: () => void;
 }) {
   const location = useLocation();
+  const isFirstRender = useRef(true);
 
-  // Close menu gracefully when navigating routes, but not on hash shifts within the page
+  // Close menu when the route actually changes. We skip the first render
+  // (mount) and don't depend on `onClose` itself, since an unstable
+  // function reference from the parent would otherwise retrigger this
+  // effect on every render and immediately close the menu after opening.
   useEffect(() => {
+    if (isFirstRender.current) {
+      isFirstRender.current = false;
+      return;
+    }
     onClose();
-  }, [location.pathname, onClose]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [location.pathname]);
 
   if (!open) return null;
 
@@ -75,7 +84,7 @@ function MobileMenu({
         <div className="flex flex-col gap-2">
           {NAV_LINKS.map((link) => {
             const className = "relative py-2 text-base font-medium text-slate-700 transition-transform duration-200 hover:scale-[1.03] hover:text-slate-900 after:absolute after:bottom-0 after:left-0 after:h-[2px] after:w-full after:origin-left after:scale-x-0 after:bg-blue-600 after:transition-transform after:duration-300 hover:after:scale-x-100 w-fit";
-            
+
             return link.isHash ? (
               <a key={link.label} href={link.href} onClick={onClose} className={className}>
                 {link.label}
@@ -89,7 +98,7 @@ function MobileMenu({
         </div>
         <div className="mt-6 flex flex-col gap-3 border-t border-slate-100 pt-6">
           <a
-            href="https://github.com"
+            href="https://github.com/rudrapatra23/HydroAtlas.git"
             target="_blank"
             rel="noopener noreferrer"
             className="flex items-center gap-2.5 rounded-lg px-3 py-2.5 text-sm font-medium text-slate-600 transition-colors hover:bg-slate-50"
@@ -113,6 +122,10 @@ export default function Navbar() {
   const [scrolled, setScrolled] = useState(false);
   const [mobileOpen, setMobileOpen] = useState(false);
 
+  // Stable reference so MobileMenu's effect doesn't see a "changed" onClose
+  // on every Navbar re-render (e.g. right after opening the menu).
+  const closeMobileMenu = useCallback(() => setMobileOpen(false), []);
+
   useEffect(() => {
     const handleScroll = () => setScrolled(window.scrollY > 8);
     window.addEventListener("scroll", handleScroll, { passive: true });
@@ -121,8 +134,8 @@ export default function Navbar() {
 
   // Dynamic text classes based on scroll state
   const logoTextClass = scrolled ? "text-slate-900" : "text-white";
-  const linkTextClass = scrolled 
-    ? "text-slate-600 hover:text-slate-900 after:bg-blue-600" 
+  const linkTextClass = scrolled
+    ? "text-slate-600 hover:text-slate-900 after:bg-blue-600"
     : "text-slate-300 hover:text-white after:bg-white";
   const iconClass = scrolled ? "text-slate-500 hover:text-slate-700 hover:bg-slate-100" : "text-slate-300 hover:text-white hover:bg-white/10";
   const hamburgerClass = scrolled ? "text-slate-600 hover:bg-slate-100" : "text-white hover:bg-white/10";
@@ -157,7 +170,7 @@ export default function Navbar() {
             {NAV_LINKS.map((link) => {
               const baseClass = "relative py-1 text-[14px] font-medium transition-all duration-200 hover:scale-[1.05] after:absolute after:bottom-0 after:left-0 after:h-[2px] after:w-full after:origin-left after:scale-x-0 after:transition-transform after:duration-300 hover:after:scale-x-100";
               const className = `${baseClass} ${linkTextClass}`;
-              
+
               return link.isHash ? (
                 <a key={link.label} href={link.href} className={className}>
                   {link.label}
@@ -173,7 +186,7 @@ export default function Navbar() {
           {/* Right: Actions */}
           <div className="hidden lg:flex items-center gap-3">
             <a
-              href="https://github.com"
+              href="https://github.com/rudrapatra23/HydroAtlas.git"
               target="_blank"
               rel="noopener noreferrer"
               aria-label="GitHub repository"
@@ -203,7 +216,7 @@ export default function Navbar() {
         </div>
       </header>
 
-      <MobileMenu open={mobileOpen} onClose={() => setMobileOpen(false)} />
+      <MobileMenu open={mobileOpen} onClose={closeMobileMenu} />
     </>
   );
 }
