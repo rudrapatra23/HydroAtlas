@@ -33,7 +33,7 @@ the opened ``Dataset`` object across callers.
 """
 
 from __future__ import annotations
-
+from application.native_io_lock import NATIVE_IO_LOCK
 from collections import OrderedDict
 from dataclasses import dataclass
 import asyncio
@@ -959,7 +959,9 @@ class RasterCache:
                     file_path=lease.path, cache_key=key,
                     extra={"wait_seconds": wait_seconds},
                 )
-                ds = xr.open_dataset(lease.path, engine="netcdf4")
+                with NATIVE_IO_LOCK:
+                    ds = xr.open_dataset(lease.path, engine="netcdf4")
+                    ds.load()
                 emit_native_event(
                     "NATIVE_OPEN_DONE",
                     file_path=lease.path, cache_key=key,

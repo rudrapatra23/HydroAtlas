@@ -1,7 +1,7 @@
 """
 netcdf_reader.py
 ================
-Read and spatially subset ERA5-style NetCDF files (variable × time_slice)
+Read and spatially subset ERA5-style NetCDF files (variable x time_slice)
 and convert a bbox/lat-lon window into a rasterio-compatible 2D array +
 Affine transform for use with the existing two-stage district clipping pipeline.
 
@@ -9,12 +9,12 @@ Key design notes
 ----------------
 * The ERA5 file uses:
   - CRS:       EPSG:4326 (geographic, degrees)
-  - Longitude: 0–360 convention (0.0 to 359.9)
-  - Latitude:  *decreasing* (90.0 → -90.0), step = -0.1°
+  - Longitude: 0-360 convention (0.0 to 359.9)
+  - Latitude:  decreasing (90.0 -> -90.0), step = -0.1 deg
 * The raster_clip pipeline expects an Affine transform with a negative y-step
-  (top-left origin, row 0 = maximum latitude) — ERA5 already satisfies this.
-* Longitude wrapping: for India (68–97°E), all longitudes are < 360 and
-  require no wrapping; the same 0–360 values are used directly.
+  (top-left origin, row 0 = maximum latitude) - ERA5 already satisfies this.
+* Longitude wrapping: for India (68-97E), all longitudes are < 360 and
+  require no wrapping; the same 0-360 values are used directly.
 
 Public API
 ----------
@@ -24,7 +24,7 @@ inspect_netcdf(path)
 read_netcdf_as_array(path, variable, time_index, bbox)
     Return (array_2d, affine_transform, crs, fill_value, metadata_dict).
     ``bbox`` must be (minx, miny, maxx, maxy) in EPSG:4326 degrees,
-    using the 0–360 longitude convention when applicable.
+    using the 0-360 longitude convention when applicable.
 
 bbox_to_lonlat_convention(minx, miny, maxx, maxy, lon_array)
     Convert a standard -180/+180 bbox to the file's longitude convention.
@@ -33,6 +33,7 @@ bbox_to_lonlat_convention(minx, miny, maxx, maxy, lon_array)
 from __future__ import annotations
 
 import logging
+import threading
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, Union
 
@@ -42,6 +43,14 @@ from rasterio.crs import CRS
 from rasterio.transform import from_bounds as affine_from_bounds
 
 logger = logging.getLogger(__name__)
+
+# netCDF4 wraps the HDF5 C library, which is not thread-safe: concurrent
+# Dataset opens/reads from separate threads can corrupt HDF5's internal
+# state and crash the whole process (observed as a Windows access
+# violation / SIGSEGV under rapid concurrent requests). This lock
+# serializes all netCDF4 file access across the process so only one
+# thread is ever inside the C library at a time.
+from application.native_io_lock import NATIVE_IO_LOCK as _NC_LOCK
 
 # ---------------------------------------------------------------------------
 # Public helpers
@@ -62,7 +71,7 @@ def inspect_netcdf(path: Union[str, Path]) -> Dict[str, Any]:
     path = Path(path)
     meta: Dict[str, Any] = {}
 
-    with nc4.Dataset(str(path)) as ds:
+    with _NC_LOCK, nc4.Dataset(str(path)) as ds:
         meta["dimensions"] = {k: len(v) for k, v in ds.dimensions.items()}
         meta["global_attrs"] = {k: str(ds.getncattr(k)) for k in ds.ncattrs()}
 
@@ -113,21 +122,10 @@ def bbox_to_lonlat_convention(
     """
     Convert a bbox in standard -180/+180 longitude to the file's convention.
 
-    If the file uses 0–360 and the bbox longitudes are already in 0–360
-    (all positive and ≤ 360), they are returned unchanged.
-    If the bbox uses -180/+180 and the file uses 0–360, negative longitudes
+    If the file uses 0-360 and the bbox longitudes are already in 0-360
+    (all positive and <= 360), they are returned unchanged.
+    If the bbox uses -180/+180 and the file uses 0-360, negative longitudes
     are shifted by +360.
-
-    Parameters
-    ----------
-    minx, miny, maxx, maxy :
-        Input bounding box (degrees).
-    lon_array :
-        The file's longitude coordinate array.
-
-    Returns
-    -------
-    (minx, miny, maxx, maxy) in the file's convention.
     """
     file_uses_360 = lon_array.max() > 180.0
     if file_uses_360:
@@ -159,7 +157,7 @@ def read_netcdf_as_array(
         0-based index into the ``valid_time`` dimension.
     bbox :
         ``(minx, miny, maxx, maxy)`` in EPSG:4326 degrees, using the
-        *file's* longitude convention (0–360 for ERA5).
+        *file's* longitude convention (0-360 for ERA5).
 
     Returns
     -------
@@ -169,7 +167,7 @@ def read_netcdf_as_array(
     affine_transform :
         ``rasterio.transform.Affine`` aligned to *array*.
     crs :
-        ``rasterio.crs.CRS`` — always ``EPSG:4326`` for ERA5.
+        ``rasterio.crs.CRS`` - always ``EPSG:4326`` for ERA5.
     fill_value :
         The variable's ``_FillValue`` (or NaN if absent).
     metadata :
@@ -180,19 +178,19 @@ def read_netcdf_as_array(
     Notes
     -----
     Latitude direction
-        ERA5 latitudes are stored *decreasing* (90 → -90, step −0.1°).
+        ERA5 latitudes are stored decreasing (90 -> -90, step -0.1 deg).
         After index selection the array rows are already north-first.
         The resulting Affine transform has a negative y-pixel-size, which
         is the standard rasterio convention.
 
     Longitude convention
-        ERA5 uses 0–360.  India's longitudes (68–97°E) fall within this
+        ERA5 uses 0-360. India's longitudes (68-97E) fall within this
         range and do not require wrapping.
     """
     path = Path(path)
     minx, miny, maxx, maxy = bbox
 
-    with nc4.Dataset(str(path)) as ds:
+    with _NC_LOCK, nc4.Dataset(str(path)) as ds:
         if variable not in ds.variables:
             available = [k for k in ds.variables if k not in ds.dimensions]
             raise KeyError(
@@ -202,13 +200,11 @@ def read_netcdf_as_array(
         lat_arr = np.array(ds.variables["latitude"][:])
         lon_arr = np.array(ds.variables["longitude"][:])
 
-        # Convert bbox to file's lon convention if needed
         minx, miny, maxx, maxy = bbox_to_lonlat_convention(
             minx, miny, maxx, maxy, lon_arr
         )
 
-        # --- Latitude indexing -------------------------------------------
-        # lat_arr is decreasing (90 → -90); miny≤lat≤maxy
+        # lat_arr is decreasing (90 -> -90); miny <= lat <= maxy
         lat_mask = (lat_arr >= miny) & (lat_arr <= maxy)
         lat_idx = np.where(lat_mask)[0]
         if len(lat_idx) == 0:
@@ -219,7 +215,6 @@ def read_netcdf_as_array(
         lat_start = int(lat_idx.min())
         lat_end   = int(lat_idx.max()) + 1  # exclusive
 
-        # --- Longitude indexing ------------------------------------------
         lon_mask = (lon_arr >= minx) & (lon_arr <= maxx)
         lon_idx = np.where(lon_mask)[0]
         if len(lon_idx) == 0:
@@ -230,7 +225,6 @@ def read_netcdf_as_array(
         lon_start = int(lon_idx.min())
         lon_end   = int(lon_idx.max()) + 1  # exclusive
 
-        # --- Read the variable slice -------------------------------------
         var_obj = ds.variables[variable]
         dims = var_obj.dimensions
         n_dims = len(dims)
@@ -249,17 +243,15 @@ def read_netcdf_as_array(
 
         arr_2d = np.array(data_slice, dtype=np.float64)
 
-        # Retrieve fill value
         try:
             fill_value = float(var_obj.getncattr("_FillValue"))
         except AttributeError:
             fill_value = None
 
-        # Replace fill values with NaN
         if fill_value is not None:
             arr_2d[arr_2d == fill_value] = np.nan
 
-        # Scale / offset (ERA5 cfgrib output is already physical — no scaling)
+        # ERA5 cfgrib output is already physical - scale/offset rarely present
         try:
             scale = float(var_obj.getncattr("scale_factor"))
             arr_2d = arr_2d * scale
@@ -271,24 +263,21 @@ def read_netcdf_as_array(
         except AttributeError:
             pass
 
-        # --- Sub-selected lat/lon arrays --------------------------------
         sub_lat = lat_arr[lat_start:lat_end]  # decreasing
         sub_lon = lon_arr[lon_start:lon_end]  # increasing
 
         n_lat, n_lon = arr_2d.shape
 
-        # lat_arr is decreasing → sub_lat[0] is northernmost (top row)
-        # Build Affine: top-left pixel center is (sub_lon[0], sub_lat[0])
-        # Resolution: lon_step positive, lat_step negative
+        # lat_arr is decreasing -> sub_lat[0] is northernmost (top row).
+        # Affine top-left pixel center is (sub_lon[0], sub_lat[0]);
+        # lon_step positive, lat_step negative.
         lon_step = float(np.diff(sub_lon[:2]).mean()) if n_lon > 1 else (lon_arr[1] - lon_arr[0])
         lat_step = float(np.diff(sub_lat[:2]).mean()) if n_lat > 1 else (lat_arr[1] - lat_arr[0])
-        # lat_step is negative (decreasing)
 
-        # Affine top-left corner = center of top-left pixel
-        # rasterio convention: transform maps pixel top-left corner
-        # So shift by half-pixel
+        # rasterio's transform maps the pixel top-left corner, not center,
+        # so shift by half a pixel from the center coordinates above.
         west  = float(sub_lon[0])  - lon_step * 0.5
-        north = float(sub_lat[0])  - lat_step * 0.5  # sub lat_step < 0, so this goes further north
+        north = float(sub_lat[0])  - lat_step * 0.5  # lat_step < 0, so this moves further north
 
         from rasterio.transform import from_origin
         affine_transform = from_origin(
@@ -298,7 +287,6 @@ def read_netcdf_as_array(
             ysize=-lat_step,  # from_origin takes positive ysize
         )
 
-        # Build metadata
         import datetime
         time_decoded = None
         if "valid_time" in ds.variables:

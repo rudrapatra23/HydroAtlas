@@ -3,7 +3,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 import logging
-from pathlib import Path
 import time
 from typing import Iterable
 
@@ -46,7 +45,6 @@ class RasterClipResult:
 @dataclass
 class AggregatedRasterStats:
     """Aggregated statistics for a single geometry over a month range."""
-
     months_processed: int
     mean: float
     minimum: float
@@ -56,17 +54,12 @@ class AggregatedRasterStats:
 def _close_and_cleanup(raster: xr.Dataset | xr.DataArray | None, lease: RasterLease | None) -> None:
     """Close the xarray object and release the raster cache lease.
 
-    Kept as a transitional helper for callers that acquired the
-    dataset and lease independently. New callers should use
-    :class:`~application.raster_cache.OpenRasterHandle` instead and
-    call ``handle.close()`` (or ``async with handle``) so the
-    dataset/lease ownership is bundled.
+    Transitional helper for callers that acquired the dataset and lease
+    independently. New callers should use OpenRasterHandle instead and
+    call handle.close() so dataset/lease ownership is bundled.
 
-    Called inside ``finally`` blocks so the caller never leaks file
-    handles even when an exception is raised mid-iteration. The lease
-    keeps the underlying file protected from eviction while the
-    caller is using it; releasing the lease here makes the file
-    eligible for eviction again.
+    Called inside finally blocks so file handles are never leaked even
+    when an exception is raised mid-iteration.
     """
     if raster is not None:
         try:
@@ -91,8 +84,6 @@ class RasterComputation:
     ):
         self.repository = repository
         self.storage = storage
-        # Module-level lock and lease registries are singletons; we only
-        # carry the cache root + budget here.
         self._raster_cache = raster_cache or RasterCache()
 
     async def _load_monthly_raster(
@@ -141,17 +132,43 @@ class RasterComputation:
         geometry: gpd.GeoDataFrame,
     ) -> RasterClipResult:
         req_id = get_request_id()
-        # Eager metadata conversion: use tuple(data.dims) for a
-        # DataArray (data.dims is a tuple of dim-name strings; dict(...)
-        # raises ValueError). Routed through safe_log so any future
-        # formatting failure cannot interrupt the clip+compute path.
+        # Eager metadata conversion: tuple(data.dims), not dict(...), since
+        # data.dims is a tuple of dim-name strings for a DataArray. Routed
+        # through safe_log so a formatting failure can't interrupt the
+        # clip+compute path.
         safe_log(
             logging.INFO,
             "RIO_CLIP_BEGIN request_id=%s dims=%s shape=%s",
             req_id, tuple(data.dims), tuple(data.shape),
         )
         flush()
-        clipped = data.rio.clip(geometry.geometry.values, geometry.crs)
+        try:
+            # all_touched=True includes any cell that overlaps the polygon
+            # at all, not just cells whose center falls inside it. Needed
+            # for small/compact districts (e.g. dense urban areas like
+            # Kolkata) that can be smaller than a single ERA5-Land cell
+            # (~0.1deg / ~11km) -- without this, such districts match zero
+            # cells under the default center-point rule and raise
+            # NoDataInBounds even though they're valid land, not ocean.
+            clipped = data.rio.clip(geometry.geometry.values, geometry.crs, all_touched=True)
+        except rioxarray.exceptions.NoDataInBounds:
+            # Genuine case: every overlapping cell is masked (ocean/no-data
+            # in the source), not a resolution artifact -- e.g. a coastal
+            # district with no ERA5-Land cell overlapping it at all. Return
+            # a zero-coverage result rather than a 500.
+            logger.warning(
+                "RIO_CLIP_NO_DATA request_id=%s -- no valid cells even with all_touched=True",
+                req_id,
+            )
+            return RasterClipResult(
+                pixel_count=0,
+                valid_pixel_count=0,
+                valid_pixel_percentage=0.0,
+                bounds=tuple(geometry.total_bounds),
+                mean=0.0,
+                minimum=0.0,
+                maximum=0.0,
+            )
         bounds = clipped.rio.bounds()
         logger.info(
             "RIO_CLIP_DONE request_id=%s bounds=%s clipped_shape=%s",
@@ -202,25 +219,20 @@ class RasterComputation:
         """Resolve ``asset`` through the shared raster cache and open it.
 
         The local cache file at
-        ``Settings.raster_cache_root_resolved()/{provider}/{variable}/{YYYY}/{MM}.nc``
+        Settings.raster_cache_root_resolved()/{provider}/{variable}/{YYYY}/{MM}.nc
         is reused across requests; concurrent requests for the same asset
         coalesce into one S3 download via the cache's per-key single-flight,
         and opens are serialised per storage key via
-        :meth:`application.raster_cache.RasterCache.open_dataset`.
+        application.raster_cache.RasterCache.open_dataset.
 
-        Returns an :class:`~application.raster_cache.OpenRasterHandle`
-        bundling the opened dataset, cache path, and active
-        :class:`RasterLease`. The caller MUST close the handle once it
-        is done so the file handle is dropped and the cache file becomes
-        eviction-eligible.
+        Returns an OpenRasterHandle bundling the opened dataset, cache
+        path, and active RasterLease. The caller MUST close the handle
+        once done so the file handle is dropped and the cache file
+        becomes eviction-eligible.
 
-        Exception safety:
-          * If ``raster_cache.acquire`` succeeds but ``open_dataset``
-            raises, the lease is released in the ``except`` arm so the
-            caller does not leak an eviction-protection refcount.
-          * If the caller raises while using the dataset, the handle's
-            ``close()`` (invoked from ``finally`` or via async-context-
-            manager) releases both the dataset and the lease.
+        Exception safety: if open_dataset (or write_crs) raises after
+        acquire succeeds, the lease is released here so the cache file
+        isn't protected forever with no reader.
         """
         lease = await self._raster_cache.acquire(asset, self.storage)
         try:
@@ -231,8 +243,6 @@ class RasterComputation:
             )
             rds = rds.rio.write_crs("EPSG:4326")
         except Exception:
-            # open_dataset (or write_crs) failed — release the lease so
-            # the cache file is not protected forever with no reader.
             try:
                 lease.release()
             except Exception:
@@ -276,11 +286,6 @@ class RasterComputation:
                     req_id, asset.provider, asset.variable, asset.year, asset.month,
                 )
                 flush()
-                # read_raster_from_s3 returns an OpenRasterHandle that
-                # owns the dataset + cache lease as a single unit; the
-                # finally block closes both atomically. The xr.open_dataset
-                # call happens inside raster_cache.open_dataset — its own
-                # OPEN_DATASET log line marks the boundary.
                 handle = await self.read_raster_from_s3(asset)
                 raster = handle.dataset
                 logger.info(
@@ -294,11 +299,6 @@ class RasterComputation:
                 )
                 flush()
                 data = self._select_raster_variable(raster, variable)
-                # Eager metadata conversion: use tuple(data.dims) for a
-                # DataArray (data.dims is a tuple of dim-name strings;
-                # dict(...) raises ValueError). Routed through safe_log
-                # so any future formatting failure cannot interrupt the
-                # clip+compute path.
                 safe_log(
                     logging.INFO,
                     "VARIABLE_SELECT_DONE request_id=%s nc_var=%s dims=%s shape=%s",
@@ -331,9 +331,7 @@ class RasterComputation:
                     flush()
 
         if months_processed == 0:
-            raise ValueError(
-                "No climate data available for the selected period."
-            )
+            raise ValueError("No climate data available for the selected period.")
 
         return AggregatedRasterStats(
             months_processed=months_processed,
@@ -354,12 +352,11 @@ class RasterComputation:
     ) -> list[MonthlySeriesPoint]:
         """Return per-month raster statistics for a district over a range.
 
-        Mirrors the memory discipline of ``compute_for_district_range``:
-        each asset is downloaded, opened, clipped, closed, and unlinked
-        before the next iteration so peak memory stays bounded to a
-        single month's worth of pixels. The returned list is ordered
-        ascending by ``(year, month)`` so the frontend can plot a clean
-        chronological series without re-sorting.
+        Mirrors the memory discipline of compute_for_district_range: each
+        asset is downloaded, opened, clipped, closed, and unlinked before
+        the next iteration so peak memory stays bounded to a single
+        month's worth of pixels. Returned list is ordered ascending by
+        (year, month).
         """
         geometry = self.get_district_geometry(district_gid)
         assets = await self.repository.list_by_period_range(
@@ -372,12 +369,7 @@ class RasterComputation:
         )
         logger.info(
             "Monthly series for district %s: found %d assets between %04d-%02d and %04d-%02d",
-            district_gid,
-            len(assets),
-            start_year,
-            start_month,
-            end_year,
-            end_month,
+            district_gid, len(assets), start_year, start_month, end_year, end_month,
         )
         if not assets:
             raise ValueError("No climate data available for the selected period.")
@@ -401,10 +393,7 @@ class RasterComputation:
                 )
                 logger.info(
                     "Monthly series point %04d-%02d for district %s: mean=%.6f",
-                    asset.year,
-                    asset.month,
-                    district_gid,
-                    clip.mean,
+                    asset.year, asset.month, district_gid, clip.mean,
                 )
             finally:
                 if handle is not None:
@@ -422,7 +411,6 @@ class RasterComputation:
     ) -> RasterClipResult:
         """Main entry point: compute raster stats for a district (single month)."""
         geometry = self.get_district_geometry(district_gid)
-
         handle = await self._load_monthly_raster(
             provider=provider, year=year, month=month, variable=variable,
         )
@@ -495,9 +483,7 @@ class RasterComputation:
 
             logger.info(
                 "State %s: districts returned=%d computed=%d",
-                state_gid,
-                len(state_districts),
-                len(results),
+                state_gid, len(state_districts), len(results),
             )
             for item in results[:5]:
                 logger.info("State %s: %s mean=%s", state_gid, item.district_id, item.mean)
@@ -526,10 +512,10 @@ class RasterComputation:
     ) -> AggregatedRasterStats:
         """Compute aggregated raster statistics for a single district over a month range.
 
-        Uses ``climate_assets`` as the index: every asset between the
-        inclusive ``[start, end]`` month bounds is fetched from PostgreSQL,
-        then iterated sequentially. Each NetCDF is downloaded from S3,
-        opened, clipped, and freed before the next is touched.
+        Uses climate_assets as the index: every asset between the
+        inclusive [start, end] month bounds is fetched from PostgreSQL,
+        then iterated sequentially. Each NetCDF is downloaded, opened,
+        clipped, and freed before the next is touched.
         """
         geometry = self.get_district_geometry(district_gid)
         assets = await self.repository.list_by_period_range(
@@ -542,12 +528,7 @@ class RasterComputation:
         )
         logger.info(
             "Range query for district %s: found %d assets between %04d-%02d and %04d-%02d",
-            district_gid,
-            len(assets),
-            start_year,
-            start_month,
-            end_year,
-            end_month,
+            district_gid, len(assets), start_year, start_month, end_year, end_month,
         )
         return await self._aggregate_for_geometry(assets, geometry, variable)
 
@@ -563,17 +544,12 @@ class RasterComputation:
     ) -> tuple[int, list[StateDistrictStatisticsItem]]:
         """Compute aggregated per-district statistics for a state over a month range.
 
-        Returns ``(months_processed, districts)`` so the router can surface
-        the same ``months_processed`` count regardless of whether any
-        district actually has data — callers can detect an empty range by
-        checking ``months_processed == 0`` before consulting the districts
-        list.
-
-        For every month in the range, the state-wide raster is downloaded
-        once and clipped against every district geometry, matching the
-        single-month ``compute_for_state`` behaviour. NetCDF files are
-        released between months so peak memory stays bounded to one
-        raster at a time.
+        Returns (months_processed, districts) so the router can surface
+        the same months_processed count regardless of whether any
+        district has data. For every month in the range, the state-wide
+        raster is downloaded once and clipped against every district
+        geometry; files are released between months so peak memory stays
+        bounded to one raster at a time.
         """
         t_total = time.perf_counter()
 
@@ -595,12 +571,7 @@ class RasterComputation:
         )
         logger.info(
             "Range query for state %s: found %d assets between %04d-%02d and %04d-%02d",
-            state_gid,
-            len(assets),
-            start_year,
-            start_month,
-            end_year,
-            end_month,
+            state_gid, len(assets), start_year, start_month, end_year, end_month,
         )
 
         if not assets:
@@ -637,8 +608,7 @@ class RasterComputation:
                     except Exception:
                         logger.exception(
                             "Failed computing stats for district %s in state %s",
-                            district_id,
-                            state_gid,
+                            district_id, state_gid,
                         )
                         continue
 
@@ -646,10 +616,7 @@ class RasterComputation:
                 months_processed += 1
                 logger.info(
                     "Aggregated month %04d-%02d for state %s: districts=%d",
-                    asset.year,
-                    asset.month,
-                    state_gid,
-                    len(per_district),
+                    asset.year, asset.month, state_gid, len(per_district),
                 )
             finally:
                 if handle is not None:
@@ -686,9 +653,7 @@ class RasterComputation:
 
         logger.info(
             "State %s: months_processed=%d districts_returned=%d",
-            state_gid,
-            months_processed,
-            len(districts),
+            state_gid, months_processed, len(districts),
         )
 
         t_total_end = time.perf_counter()
