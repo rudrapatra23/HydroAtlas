@@ -1,30 +1,10 @@
-/**
- * `useDistrictData` — React hook that subscribes to the canonical
- * district data store and triggers fetches when the (district, range,
- * variables) key changes.
- *
- * Both the right-side `SelectedLocation` panel and the bottom
- * `BottomPanel` call this hook with the same arguments when the user
- * selects a district; the hook guarantees they consume one shared
- * canonical result and never duplicate the underlying raster work.
- *
- * Returned shape:
- *   - `loading`        — true while the canonical fetch is in flight.
- *   - `error`          — error message string, or null.
- *   - `noData`         — true when the backend returned 404 for the period.
- *   - `seriesByVariable` — per-variable `DistrictMonthlySeries` map
- *                          (may be partial if the fetch is still in flight).
- *   - `monthsProcessed` — months actually computed by the backend.
- *   - `ready`          — true when the entry has status `ready`.
- */
-
 import { useEffect, useMemo } from "react";
 import {
+  useDistrictDataStore,
   canonicalKey,
   EMPTY_ENTRY,
-  type EnsureLoadedParams,
-  type Variable,
-  useDistrictDataStore,
+  Variable,
+  DistrictSeriesEntry,
 } from "../stores/districtDataStore";
 
 export interface UseDistrictDataParams {
@@ -36,73 +16,62 @@ export interface UseDistrictDataParams {
 
 export interface UseDistrictDataResult {
   loading: boolean;
-  error: string | null;
-  noData: boolean;
-  seriesByVariable: Partial<Record<Variable, import("../api/boundaries").DistrictMonthlySeries>>;
-  monthsProcessed: number;
   ready: boolean;
+  noData: boolean;
+  error: string | null;
+  seriesByVariable: DistrictSeriesEntry["seriesByVariable"];
+  monthsProcessed: number;
 }
 
+/**
+ * Thin reactive wrapper around `useDistrictDataStore`.
+ *
+ * All the actual fetch/dedup/cache/race-safety logic lives in the store
+ * (see districtDataStore.ts). This hook's only jobs are:
+ *   1. Compute the canonical key for the current params.
+ *   2. Kick off `ensureLoaded` when that key changes (idempotent — the
+ *      store itself is a no-op if the key is already loading/ready).
+ *   3. Subscribe to the store entry for that key so the component
+ *      re-renders as status/data change.
+ *
+ * Returns a safe default (EMPTY_ENTRY-derived) when required params are
+ * missing, so consumers never read off `undefined`.
+ */
 export function useDistrictData(params: UseDistrictDataParams): UseDistrictDataResult {
   const { districtId, startMonth, endMonth, variables } = params;
 
-  // Compute the canonical key. Memoised so identity is stable across
-  // renders unless one of the inputs actually changes.
+  const isValid = Boolean(districtId && startMonth && endMonth && variables.length > 0);
+
+  // Recomputed whenever inputs change; the resulting *string* is stable
+  // in value even if `variables` is a fresh array literal each render
+  // (e.g. inline arrays in JSX), so effects keyed on `key` below won't
+  // re-fire on every render — only when the key's actual content does.
   const key = useMemo(() => {
-    if (!districtId || !startMonth || !endMonth) return null;
-    if (variables.length === 0) return null;
+    if (!districtId || !startMonth || !endMonth || variables.length === 0) return null;
     return canonicalKey(districtId, startMonth, endMonth, variables);
-  }, [districtId, startMonth, endMonth, variables]);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [districtId, startMonth, endMonth, variables.join(",")]);
 
-  // Subscribe to the entry for this key. useDistrictDataStore uses
-  // Zustand's standard selector subscription so re-renders only fire
-  // when the selected slice changes.
-  const entry = useDistrictDataStore((s) => (key ? s.byKey[key] : undefined));
-
-  // Trigger ensureLoaded when the key changes.
   const ensureLoaded = useDistrictDataStore((s) => s.ensureLoaded);
-  const reset = useDistrictDataStore((s) => s.reset);
+  const entry = useDistrictDataStore((s) => (key ? s.byKey[key] ?? EMPTY_ENTRY : EMPTY_ENTRY));
 
   useEffect(() => {
-    if (!key || !districtId || !startMonth || !endMonth) {
-      return;
-    }
-    const loadParams: EnsureLoadedParams = {
-      districtId,
-      startMonth,
-      endMonth,
-      variables,
-    };
-    void ensureLoaded(loadParams);
-  }, [key, districtId, startMonth, endMonth, variables.join(","), ensureLoaded]);
+    if (!key || !districtId || !startMonth || !endMonth) return;
+    void ensureLoaded({ districtId, startMonth, endMonth, variables });
+    // `key` alone captures every input that matters (district, range,
+    // sorted variable set); re-running only when it changes is correct
+    // and avoids re-fetching on unstable array references.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [key]);
 
-  // When the key becomes invalid (deselect / empty range / no variables),
-  // reset the previous entry so consumers see a clean state.
-  useEffect(() => {
-    if (key) return;
-    // Reset all keys that match the prior inputs so any stale data is cleared.
-    // Use a generation bump via cancel to avoid leaking in-flight requests.
-    return () => {
-      // No-op cleanup; components manage their own visible state.
-    };
-  }, [key, reset]);
-
-  const result: UseDistrictDataResult = entry
-    ? {
-        loading: entry.status === "loading",
-        error: entry.error,
-        noData: entry.noData,
-        seriesByVariable: entry.seriesByVariable,
-        monthsProcessed: entry.monthsProcessed,
-        ready: entry.status === "ready",
-      }
-    : {
-        loading: false,
-        error: null,
-        noData: false,
-        seriesByVariable: EMPTY_ENTRY.seriesByVariable,
-        monthsProcessed: 0,
-        ready: false,
-      };
-  return result;
+  return {
+    loading: isValid && (entry.status === "idle" || entry.status === "loading"),
+    ready: entry.status === "ready",
+    noData: entry.noData,
+    error: entry.error,
+    seriesByVariable: entry.seriesByVariable,
+    monthsProcessed: entry.monthsProcessed,
+  };
 }
+
+export default useDistrictData;

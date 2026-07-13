@@ -1,10 +1,10 @@
+import { useEffect, useMemo } from "react";
 import {
   useAppStore,
   yearMonthToMonthString,
   monthStringToYearMonth,
   LayerKey,
 } from "../../stores/useAppStore";
-import { useEffect, useMemo } from "react";
 import { getDatasets, getDistricts, getStates } from "../../api/boundaries";
 
 const MONTH_NAMES = [
@@ -12,11 +12,21 @@ const MONTH_NAMES = [
   "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
 ];
 
-const LAYER_LABELS: Record<LayerKey, { name: string; color: string; icon: string; variable: "precipitation" | "soil_moisture" | "surface_runoff" }> = {
+const LAYER_LABELS: Record<
+  LayerKey,
+  { name: string; color: string; icon: string; variable: "precipitation" | "soil_moisture" | "surface_runoff" }
+> = {
   rainfall: { name: "Rainfall", color: "#2563EB", icon: "rainy", variable: "precipitation" },
   "soil-moisture": { name: "Soil Moisture", color: "#16A34A", icon: "water_drop", variable: "soil_moisture" },
   runoff: { name: "Surface Runoff", color: "#EA580C", icon: "waves", variable: "surface_runoff" },
 };
+
+// Shared styling tokens so every field in this panel stays visually
+// identical without repeating the same Tailwind string at each call site.
+const SELECT_CLASS =
+  "w-full h-9 rounded-md border border-slate-200 bg-white px-2.5 text-sm text-slate-800 outline-none transition-colors focus:border-slate-400 disabled:bg-slate-50 disabled:text-slate-400 disabled:cursor-not-allowed";
+const FIELD_LABEL_CLASS = "block text-xs text-slate-600 mb-1";
+const SECTION_LABEL_CLASS = "text-[11px] font-semibold uppercase tracking-wider text-slate-500";
 
 function DataExplorer() {
   const sidebarOpen = useAppStore((state) => state.leftSidebarOpen);
@@ -40,27 +50,22 @@ function DataExplorer() {
   const setEndMonth = useAppStore((state) => state.setEndMonth);
   const setAvailableRange = useAppStore((state) => state.setAvailableRange);
 
-  // Fetch states on mount.
+  // A period must be chosen before region selection unlocks. This keeps
+  // users from picking a district before they've scoped the time range
+  // that every downstream fetch (statistics, time-series, raster) needs.
+  const periodReady = Boolean(startMonth && endMonth);
+
   useEffect(() => {
-    async function fetchStates() {
-      try {
-        const data = await getStates();
-        setStates(data.map((item: any) => ({ id: item.state_id, name: item.name })));
-      } catch (error) {
-        console.error("Failed to fetch states:", error);
-      }
-    }
-    fetchStates();
+    getStates()
+      .then((data) => setStates(data.map((item) => ({ id: item.state_id, name: item.name }))))
+      .catch((error) => console.error("Failed to fetch states:", error));
   }, [setStates]);
 
-  // Fetch the available dataset range on mount and seed the month
-  // pickers from it. The range is recomputed from every climate_assets
-  // row the backend exposes via GET /datasets, so the UI never assumes
-  // a fixed year/month. Only seeds the pickers on the first load —
-  // subsequent user edits to Start Month / End Month are preserved.
+  // Seeds the month pickers from the dataset's actual available range on
+  // first load only; later user edits to Start/End Month are preserved.
   useEffect(() => {
     let cancelled = false;
-    async function fetchRange() {
+    (async () => {
       try {
         const assets = await getDatasets();
         if (cancelled) return;
@@ -68,52 +73,32 @@ function DataExplorer() {
           setAvailableRange(null);
           return;
         }
-        let minYear = assets[0].year;
-        let minMonth = assets[0].month;
-        let maxYear = assets[0].year;
-        let maxMonth = assets[0].month;
+        let minYear = assets[0].year, minMonth = assets[0].month;
+        let maxYear = assets[0].year, maxMonth = assets[0].month;
         for (const asset of assets) {
-          const startKey = asset.year * 12 + (asset.month - 1);
-          const minKey = minYear * 12 + (minMonth - 1);
-          const maxKey = maxYear * 12 + (maxMonth - 1);
-          if (startKey < minKey) {
-            minYear = asset.year;
-            minMonth = asset.month;
-          }
-          if (startKey > maxKey) {
-            maxYear = asset.year;
-            maxMonth = asset.month;
-          }
+          const key = asset.year * 12 + (asset.month - 1);
+          if (key < minYear * 12 + (minMonth - 1)) [minYear, minMonth] = [asset.year, asset.month];
+          if (key > maxYear * 12 + (maxMonth - 1)) [maxYear, maxMonth] = [asset.year, asset.month];
         }
         setAvailableRange({ minYear, minMonth, maxYear, maxMonth });
         if (!startMonth) setStartMonth(yearMonthToMonthString(minYear, minMonth));
         if (!endMonth) setEndMonth(yearMonthToMonthString(maxYear, maxMonth));
       } catch (error) {
-        console.error("Failed to fetch dataset range:", error);
+        if (!cancelled) console.error("Failed to fetch dataset range:", error);
       }
-    }
-    fetchRange();
+    })();
     return () => {
       cancelled = true;
     };
-    // Intentionally only runs once on mount — the range itself is
-    // captured in `availableRange` and downstream effects react to
-    // startMonth/endMonth changes via the store.
+    // Runs once on mount; startMonth/endMonth changes afterward are
+    // user-driven and shouldn't re-trigger this seed.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
-  // Fetch districts when selected state changes.
-  //
-  // Cancellation contract (see H1.b in .kimchi/docs/race-diagnosis.md):
-  // rapid state changes S1 -> S2 -> S3 used to leave the dropdown
-  // showing whichever state's districts resolved LAST, not the user's
-  // CURRENTLY selected state. We now defend with two layers:
-  //   1. AbortController — the in-flight fetch is cancelled at the
-  //      network layer the moment the next effect run starts.
-  //   2. Identity guard — after the await resolves we compare the
-  //      captured stateId to the latest selectedStateId from the
-  //      store. If they differ we discard the result, so an abort
-  //      that arrived too late can never poison the dropdown.
+  // Fetch districts when the selected state changes. Guarded against the
+  // classic S1 -> S2 -> S3 race with both an AbortController and an
+  // identity check against the store's latest selectedStateId, so a late
+  // response can never overwrite a newer selection.
   useEffect(() => {
     if (!selectedStateId) {
       setDistricts([]);
@@ -123,25 +108,18 @@ function DataExplorer() {
     const ac = new AbortController();
     let cancelled = false;
 
-    async function fetchDistricts() {
-      try {
-        const data = await getDistricts(stateId, ac.signal);
+    getDistricts(stateId, ac.signal)
+      .then((data) => {
+        if (cancelled || useAppStore.getState().selectedStateId !== stateId) return;
+        setDistricts(data.map((item) => ({ id: item.district_id, name: item.name })));
+      })
+      .catch((error) => {
         if (cancelled) return;
-        // Identity guard: abort can arrive after the await resolves;
-        // the store may already reflect a newer selection.
-        const current = useAppStore.getState().selectedStateId;
-        if (current !== stateId) return;
-        setDistricts(
-          data.map((item: any) => ({ id: item.district_id, name: item.name })),
-        );
-      } catch (error) {
-        if (cancelled) return;
-        if (error instanceof DOMException && error.name === "AbortError") return;
-        if (error instanceof Error && /AbortError/i.test(error.message)) return;
-        console.error("Failed to fetch districts:", error);
-      }
-    }
-    fetchDistricts();
+        const aborted =
+          (error instanceof DOMException && error.name === "AbortError") ||
+          (error instanceof Error && /AbortError/i.test(error.message));
+        if (!aborted) console.error("Failed to fetch districts:", error);
+      });
 
     return () => {
       cancelled = true;
@@ -149,49 +127,33 @@ function DataExplorer() {
     };
   }, [selectedStateId, setDistricts]);
 
-  // Parse current month strings into {year, month} tuples. Memoised
-  // so the year/month select options don't rebuild on every render.
   const startYM = useMemo(() => monthStringToYearMonth(startMonth), [startMonth]);
   const endYM = useMemo(() => monthStringToYearMonth(endMonth), [endMonth]);
 
-  // Build the list of selectable years from availableRange so the user
-  // can jump directly from 2026 to 2017 without scrolling. Falls back
-  // to the current year ± 2 if the range hasn't loaded yet.
   const yearOptions = useMemo(() => {
     if (!availableRange) {
       const fallback = new Date().getFullYear();
       return [fallback - 1, fallback, fallback + 1];
     }
     const years: number[] = [];
-    for (let y = availableRange.minYear; y <= availableRange.maxYear; y++) {
-      years.push(y);
-    }
+    for (let y = availableRange.minYear; y <= availableRange.maxYear; y++) years.push(y);
     return years;
   }, [availableRange]);
 
-  // Enforce Start Month <= End Month. If the user picks a Start that is
-  // after End, we snap End forward to match. If they pick an End that
-  // is before Start, we snap Start back. The store still stores
-  // ``YYYY-MM`` strings so the API payload is unchanged.
+  // Enforces Start <= End by snapping the other end forward/back when a
+  // pick would invert the range.
   const handleStartChange = (year: number, month: number) => {
     setStartMonth(yearMonthToMonthString(year, month));
     const endKey = endYM ? endYM.year * 12 + endYM.month : -1;
-    const newKey = year * 12 + month;
-    if (newKey > endKey) {
-      setEndMonth(yearMonthToMonthString(year, month));
-    }
+    if (year * 12 + month > endKey) setEndMonth(yearMonthToMonthString(year, month));
   };
 
   const handleEndChange = (year: number, month: number) => {
     setEndMonth(yearMonthToMonthString(year, month));
     const startKey = startYM ? startYM.year * 12 + startYM.month : Number.MAX_SAFE_INTEGER;
-    const newKey = year * 12 + month;
-    if (newKey < startKey) {
-      setStartMonth(yearMonthToMonthString(year, month));
-    }
+    if (year * 12 + month < startKey) setStartMonth(yearMonthToMonthString(year, month));
   };
 
-  // Collapsed state: show only a compact "Data Explorer" toggle.
   if (!sidebarOpen) {
     return (
       <button
@@ -200,17 +162,14 @@ function DataExplorer() {
         className="flex h-9 items-center gap-2 rounded-md border border-slate-200 bg-white px-3 text-sm font-medium text-slate-700 transition-colors hover:bg-slate-50"
         aria-label="Open data explorer"
       >
-        <span className="material-symbols-rounded text-slate-600" style={{ fontSize: 18 }}>
-          menu
-        </span>
+        <span className="material-symbols-rounded text-slate-600" style={{ fontSize: 18 }}>menu</span>
         Data Explorer
       </button>
     );
   }
 
   return (
-    <div className="w-[300px] rounded-md border border-slate-200 bg-white">
-      {/* Header */}
+    <div className="w-[300px] rounded-md border border-slate-200 bg-white shadow-sm">
       <div className="flex items-center justify-between px-4 py-3 border-b border-slate-200">
         <p className="text-sm font-semibold text-slate-900">Data Explorer</p>
         <button
@@ -219,64 +178,14 @@ function DataExplorer() {
           className="flex h-6 w-6 items-center justify-center rounded-md text-slate-500 transition-colors hover:bg-slate-100"
           aria-label="Close data explorer"
         >
-          <span className="material-symbols-rounded" style={{ fontSize: 16 }}>
-            close
-          </span>
+          <span className="material-symbols-rounded" style={{ fontSize: 16 }}>close</span>
         </button>
       </div>
 
       <div className="px-4 py-4 space-y-5">
-        {/* REGION */}
+        {/* PERIOD — chosen first; everything else scopes to this range */}
         <div className="space-y-2">
-          <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-            Region
-          </p>
-          <div className="space-y-2">
-            <div>
-              <label htmlFor="state-select" className="block text-xs text-slate-600 mb-1">
-                State
-              </label>
-              <select
-                id="state-select"
-                value={selectedStateId || ""}
-                onChange={(e) => setSelectedStateId(e.target.value || null)}
-                className="w-full h-9 rounded-md border border-slate-200 bg-white px-2.5 text-sm text-slate-800 outline-none transition-colors focus:border-slate-400"
-              >
-                <option value="">Select a state</option>
-                {states.map((state) => (
-                  <option key={state.id} value={state.id}>
-                    {state.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-            <div>
-              <label htmlFor="district-select" className="block text-xs text-slate-600 mb-1">
-                District
-              </label>
-              <select
-                id="district-select"
-                value={selectedDistrictId || ""}
-                onChange={(e) => setSelectedDistrictId(e.target.value || null)}
-                disabled={!selectedStateId}
-                className="w-full h-9 rounded-md border border-slate-200 bg-white px-2.5 text-sm text-slate-800 outline-none transition-colors focus:border-slate-400 disabled:bg-slate-50 disabled:text-slate-400"
-              >
-                <option value="">Select a district</option>
-                {districts.map((district) => (
-                  <option key={district.id} value={district.id}>
-                    {district.name}
-                  </option>
-                ))}
-              </select>
-            </div>
-          </div>
-        </div>
-
-        {/* PERIOD */}
-        <div className="space-y-2">
-          <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-            Period
-          </p>
+          <p className={SECTION_LABEL_CLASS}>1. Period</p>
           <div className="space-y-2">
             <PeriodRow
               idPrefix="start"
@@ -297,24 +206,58 @@ function DataExplorer() {
           </div>
         </div>
 
+        {/* REGION — locked until a period is set */}
+        <div className="space-y-2">
+          <p className={SECTION_LABEL_CLASS}>2. Region</p>
+          {!periodReady && (
+            <p className="text-xs text-slate-400">Select a period above to choose a region.</p>
+          )}
+          <div className="space-y-2">
+            <div>
+              <label htmlFor="state-select" className={FIELD_LABEL_CLASS}>State</label>
+              <select
+                id="state-select"
+                value={selectedStateId || ""}
+                onChange={(e) => setSelectedStateId(e.target.value || null)}
+                disabled={!periodReady}
+                className={SELECT_CLASS}
+              >
+                <option value="">Select a state</option>
+                {states.map((state) => (
+                  <option key={state.id} value={state.id}>{state.name}</option>
+                ))}
+              </select>
+            </div>
+            <div>
+              <label htmlFor="district-select" className={FIELD_LABEL_CLASS}>District</label>
+              <select
+                id="district-select"
+                value={selectedDistrictId || ""}
+                onChange={(e) => setSelectedDistrictId(e.target.value || null)}
+                disabled={!periodReady || !selectedStateId}
+                className={SELECT_CLASS}
+              >
+                <option value="">Select a district</option>
+                {districts.map((district) => (
+                  <option key={district.id} value={district.id}>{district.name}</option>
+                ))}
+              </select>
+            </div>
+          </div>
+        </div>
+
         {/* DATASET */}
         <div className="space-y-2">
-          <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-            Dataset
-          </p>
+          <p className={SECTION_LABEL_CLASS}>Dataset</p>
           <div className="flex items-center gap-2 h-9 px-2.5 rounded-md border border-slate-200 bg-slate-50">
-            <span className="material-symbols-rounded text-slate-500" style={{ fontSize: 18 }}>
-              public
-            </span>
+            <span className="material-symbols-rounded text-slate-500" style={{ fontSize: 18 }}>public</span>
             <span className="text-sm font-medium text-slate-700">ERA5-Land</span>
           </div>
         </div>
 
         {/* LAYERS */}
         <div className="space-y-2">
-          <p className="text-[11px] font-semibold uppercase tracking-wider text-slate-500">
-            Layers
-          </p>
+          <p className={SECTION_LABEL_CLASS}>Layers</p>
           <div className="space-y-1">
             {(Object.keys(LAYER_LABELS) as LayerKey[]).map((layerKey) => {
               const data = LAYER_LABELS[layerKey];
@@ -340,26 +283,15 @@ function DataExplorer() {
                   <div className="flex items-center gap-2">
                     <span
                       className="material-symbols-rounded"
-                      style={{
-                        fontSize: 18,
-                        color: data.color,
-                        opacity: enabled ? 1 : 0.4,
-                      }}
+                      style={{ fontSize: 18, color: data.color, opacity: enabled ? 1 : 0.4 }}
                     >
                       {data.icon}
                     </span>
-                    <span
-                      className={`text-sm font-medium ${
-                        enabled ? "text-slate-700" : "text-slate-400"
-                      }`}
-                    >
+                    <span className={`text-sm font-medium ${enabled ? "text-slate-700" : "text-slate-400"}`}>
                       {data.name}
                     </span>
                   </div>
-                  <Toggle
-                    checked={enabled}
-                    onChange={() => toggleLayer(layerKey)}
-                  />
+                  <Toggle checked={enabled} onChange={() => toggleLayer(layerKey)} />
                 </div>
               );
             })}
@@ -387,19 +319,17 @@ function PeriodRow({
 }) {
   return (
     <div>
-      <label className="block text-xs text-slate-600 mb-1">{label}</label>
+      <label className={FIELD_LABEL_CLASS}>{label}</label>
       <div className="flex gap-1.5">
         <select
           id={`${idPrefix}-year`}
           aria-label={`${label} year`}
           value={year}
           onChange={(e) => onChange(Number(e.target.value), month)}
-          className="flex-1 h-9 rounded-md border border-slate-200 bg-white px-2.5 text-sm text-slate-800 outline-none transition-colors focus:border-slate-400 tabular-nums"
+          className={`flex-1 ${SELECT_CLASS} tabular-nums`}
         >
           {yearOptions.map((y) => (
-            <option key={y} value={y}>
-              {y}
-            </option>
+            <option key={y} value={y}>{y}</option>
           ))}
         </select>
         <select
@@ -407,12 +337,10 @@ function PeriodRow({
           aria-label={`${label} month`}
           value={month}
           onChange={(e) => onChange(year, Number(e.target.value))}
-          className="flex-[1.2] h-9 rounded-md border border-slate-200 bg-white px-2.5 text-sm text-slate-800 outline-none transition-colors focus:border-slate-400"
+          className={`flex-[1.2] ${SELECT_CLASS}`}
         >
           {MONTH_NAMES.map((name, idx) => (
-            <option key={name} value={idx + 1}>
-              {name}
-            </option>
+            <option key={name} value={idx + 1}>{name}</option>
           ))}
         </select>
       </div>
@@ -430,9 +358,7 @@ function Toggle({ checked, onChange }: { checked: boolean; onChange: () => void 
         e.stopPropagation();
         onChange();
       }}
-      className={`relative h-5 w-9 rounded-full transition-colors ${
-        checked ? "bg-blue-600" : "bg-slate-200"
-      }`}
+      className={`relative h-5 w-9 rounded-full transition-colors ${checked ? "bg-blue-600" : "bg-slate-200"}`}
     >
       <span
         className={`absolute top-0.5 left-0.5 h-4 w-4 rounded-full bg-white shadow-sm transition-transform ${
