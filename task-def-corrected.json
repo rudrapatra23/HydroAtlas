@@ -1,0 +1,57 @@
+{
+    "family": "hydroatlas-era5-scheduler",
+    "taskRoleArn": "arn:aws:iam::640528294612:role/HydroAtlasTaskRole",
+    "executionRoleArn": "arn:aws:iam::640528294612:role/ecsTaskExecutionRole",
+    "networkMode": "awsvpc",
+    "requiresCompatibilities": ["FARGATE"],
+    "cpu": "1024",
+    "memory": "2048",
+    "runtimePlatform": {
+        "cpuArchitecture": "X86_64",
+        "operatingSystemFamily": "LINUX"
+    },
+    "containerDefinitions": [
+        {
+            "name": "era5-scheduler",
+            "image": "640528294612.dkr.ecr.ap-south-1.amazonaws.com/hydroatlas-backend:latest",
+            "essential": true,
+            "command": [
+                "python",
+                "-m",
+                "ingestion.era5.scheduler"
+            ],
+            "environment": [
+                { "name": "ERA5_HISTORY_YEARS", "value": "10" },
+                { "name": "AWS_REGION", "value": "ap-south-1" },
+                { "name": "ERA5_SYNC_CONCURRENCY", "value": "1" },
+                { "name": "ERA5_SCHEDULER_RUN_ONCE", "value": "true" },
+                { "name": "S3_BUCKET_NAME", "value": "hydroatlas-data-640528294612-ap-south-1" },
+                { "name": "ERA5_SCHEDULER_TIMEZONE", "value": "UTC" },
+                { "name": "ENVIRONMENT", "value": "production" },
+                { "name": "APP_NAME", "value": "HydroAtlas" },
+                { "name": "VERSION", "value": "0.1.0" },
+                { "name": "AWS_DEFAULT_REGION", "value": "ap-south-1" },
+                { "name": "CDSAPI_URL", "value": "https://cds.climate.copernicus.eu/api" },
+                { "name": "LOG_LEVEL", "value": "INFO" }
+            ],
+            "secrets": [
+                {
+                    "name": "DATABASE_URL",
+                    "valueFrom": "arn:aws:secretsmanager:ap-south-1:640528294612:secret:hydroatlas/DATABASE_URL-fObYoZ:DATABASE_URL::"
+                },
+                {
+                    "name": "CDSAPI_KEY",
+                    "valueFrom": "arn:aws:secretsmanager:ap-south-1:640528294612:secret:hydroatlas/CDSAPI_KEY-aeJos7"
+                }
+            ],
+            "logConfiguration": {
+                "logDriver": "awslogs",
+                "options": {
+                    "awslogs-group": "/ecs/hydroatlas-era5-scheduler",
+                    "awslogs-region": "ap-south-1",
+                    "awslogs-stream-prefix": "ecs"
+                }
+            }
+        }
+    ]
+}

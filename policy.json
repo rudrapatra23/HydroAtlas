@@ -1,0 +1,82 @@
+﻿{
+    "Version": "2012-10-17",
+    "Statement": [
+        {
+            "Sid": "ECSTaskDefAndRun",
+            "Effect": "Allow",
+            "Action": [
+                "ecs:DescribeTaskDefinition",
+                "ecs:RegisterTaskDefinition",
+                "ecs:RunTask",
+                "ecs:DescribeTasks"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Sid": "PassTaskRoles",
+            "Effect": "Allow",
+            "Action": "iam:PassRole",
+            "Resource": [
+                "arn:aws:iam::640528294612:role/HydroAtlasTaskRole",
+                "arn:aws:iam::640528294612:role/ecsTaskExecutionRole"
+            ]
+        },
+        {
+            "Sid": "CloudWatchLogsRead",
+            "Effect": "Allow",
+            "Action": [
+                "logs:GetLogEvents",
+                "logs:FilterLogEvents",
+                "logs:DescribeLogStreams",
+                "logs:DescribeLogGroups"
+            ],
+            "Resource": "*"
+        },
+        {
+            "Sid": "ECRDescribeImages",
+            "Effect": "Allow",
+            "Action": [
+                "ecr:DescribeImages",
+                "ecr:DescribeRepositories",
+                "ecr:ListImages"
+            ],
+            "Resource": [
+                "arn:aws:ecr:ap-south-1:640528294612:repository/hydroatlas-backend",
+                "arn:aws:ecr:ap-south-1:640528294612:repository/hydroatlas-era5-scheduler"
+            ]
+        },
+        {
+            "Sid": "EcrAuthToken",
+            "Effect": "Allow",
+            "Action": "ecr:GetAuthorizationToken",
+            "Resource": "*"
+        },
+        {
+            "Sid": "EcrPush",
+            "Effect": "Allow",
+            "Action": [
+                "ecr:BatchCheckLayerAvailability",
+                "ecr:PutImage",
+                "ecr:InitiateLayerUpload",
+                "ecr:UploadLayerPart",
+                "ecr:CompleteLayerUpload"
+            ],
+            "Resource": [
+                "arn:aws:ecr:ap-south-1:640528294612:repository/hydroatlas-backend",
+                "arn:aws:ecr:ap-south-1:640528294612:repository/hydroatlas-era5-scheduler"
+            ]
+        },
+        {
+            "Sid": "EC2NetworkReadAndClusterList",
+            "Effect": "Allow",
+            "Action": [
+                "ec2:DescribeSubnets",
+                "ec2:DescribeSecurityGroups",
+                "ec2:DescribeVpcs",
+                "ecs:ListClusters",
+                "ecs:DescribeClusters"
+            ],
+            "Resource": "*"
+        }
+    ]
+}
