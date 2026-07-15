@@ -14,7 +14,7 @@ from datetime import datetime
 from decimal import Decimal
 from typing import Sequence
 
-from sqlalchemy import delete, func, insert, select, update
+from sqlalchemy import delete, func, insert, select, tuple_, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -107,14 +107,6 @@ class PostgresDistrictMonthlyStatisticsRepository:
         self.session = session
 
     async def bulk_upsert(self, rows: Sequence[DistrictMonthlyStatisticsRow]) -> int:
-        """Insert (or replace) every row in one statement.
-
-        Uses the PostgreSQL ``ON CONFLICT`` clause keyed on the unique
-        constraint to keep recomputation idempotent. Returns the count
-        of rows the database actually wrote — equal to ``len(rows)`` on
-        a clean run and ``0 < n < len(rows)`` on a re-run that
-        conflicts on every existing key.
-        """
         if not rows:
             return 0
         payload = [_from_row(r) for r in rows]
@@ -141,9 +133,6 @@ class PostgresDistrictMonthlyStatisticsRepository:
 
     async def count_for_asset(self, source_asset_id: str) -> int:
         """Number of precomputed rows that reference ``source_asset_id``.
-
-        Used by the precompute command's "already done?" short-circuit
-        and by the GC helper to detect dangling references.
         """
         stmt = select(func.count(DistrictMonthlyStatisticsModel.id)).where(
             DistrictMonthlyStatisticsModel.source_asset_id == source_asset_id,
@@ -176,6 +165,58 @@ class PostgresDistrictMonthlyStatisticsRepository:
         if model is None:
             return None
         return _to_domain(model)
+
+    """
+Add this method to PostgresDistrictMonthlyStatisticsRepository, right
+after get_for_district. Also add `tuple_` to the sqlalchemy import at
+the top of the file: from sqlalchemy import delete, func, insert,
+select, tuple_, update
+"""
+
+    async def list_for_district_range(
+        self,
+        *,
+        provider: str,
+        variable: str,
+        gid_2: str,
+        start_year: int,
+        start_month: int,
+        end_year: int,
+        end_month: int,
+    ) -> list[DistrictMonthlyStatisticsRow]:
+        """Return precomputed rows for one district over an inclusive
+        [start, end] month range, in chronological order.
+
+        Uses tuple_() for correct numeric (year, month) range comparison --
+        matches the logic in _validate_range_against_inventory in
+        districts.py, which does the same start_key/end_key comparison by
+        hand in Python. This pushes it into the query instead.
+
+        Backed by the (provider, variable, gid_2, year, month) unique index.
+        """
+        stmt = (
+            select(DistrictMonthlyStatisticsModel)
+            .where(
+                DistrictMonthlyStatisticsModel.provider == provider,
+                DistrictMonthlyStatisticsModel.variable == variable,
+                DistrictMonthlyStatisticsModel.gid_2 == gid_2,
+                tuple_(
+                    DistrictMonthlyStatisticsModel.year,
+                    DistrictMonthlyStatisticsModel.month,
+                ) >= (start_year, start_month),
+                tuple_(
+                    DistrictMonthlyStatisticsModel.year,
+                    DistrictMonthlyStatisticsModel.month,
+                ) <= (end_year, end_month),
+            )
+            .order_by(
+                DistrictMonthlyStatisticsModel.year,
+                DistrictMonthlyStatisticsModel.month,
+            )
+        )
+        result = await self.session.execute(stmt)
+        models = result.scalars().all()
+        return [_to_domain(m) for m in models]
 
     async def delete_for_asset(self, source_asset_id: str) -> int:
         """Delete every row referencing ``source_asset_id``.

@@ -6,20 +6,30 @@ import os
 import threading
 from typing import Annotated
 
+import numpy as np
 from fastapi import APIRouter, Depends, HTTPException, Query, status
 
-from api.dependencies import get_district_clipper, get_repository, get_storage
+from api.dependencies import (
+    get_district_clipper,
+    get_repository,
+    get_storage,
+    get_dms_repository,
+)
 from application.diagnostics import flush, request_context
 from application.dto.requests import StatisticsRequest
 from application.dto.responses import (
     DistrictMonthlySeriesResponse,
     DistrictRasterClipResponse,
+    MonthlySeriesPoint,
     StatisticsResponse,
 )
 from application.raster_computation import RasterComputation
 from district_clip import DistrictNotFoundError, Era5DistrictClipper
 from domain.ports.dataset_repository import DatasetRepository
 from domain.ports.storage_port import StoragePort
+from infrastructure.repositories.postgres_district_monthly_statistics_repository import (
+    PostgresDistrictMonthlyStatisticsRepository,
+)
 
 logger = logging.getLogger("uvicorn.error")
 
@@ -34,10 +44,10 @@ async def get_raster_computation(
 
 
 # The fundamental time unit is one month. The frontend sends an inclusive
-# ``[start, end]`` month range; the backend uses PostgreSQL
-# ``climate_assets`` as the index to find every monthly asset between the
-# two months, downloads them from S3 sequentially, and returns aggregated
-# statistics over the period.
+# ``[start, end]`` month range. Precomputed months are served straight from
+# ``district_monthly_statistics``; any month in the range that isn't
+# precomputed yet falls back to a live single-district, single-month clip,
+# so the cost of a gap is proportional to the gap, not the whole request.
 _NO_PERIOD_MESSAGE = "No climate data available for the selected period."
 
 
@@ -72,13 +82,42 @@ def _validate_range_against_inventory(
         )
 
 
+def _missing_months(
+    have: set[tuple[int, int]],
+    start_year: int,
+    start_month: int,
+    end_year: int,
+    end_month: int,
+) -> list[tuple[int, int]]:
+    """(year, month) pairs in the inclusive range that aren't in `have`."""
+    missing: list[tuple[int, int]] = []
+    y, m = start_year, start_month
+    while (y, m) <= (end_year, end_month):
+        if (y, m) not in have:
+            missing.append((y, m))
+        m += 1
+        if m > 12:
+            m = 1
+            y += 1
+    return missing
+
+
 @router.post("/{district_id}/statistics", response_model=StatisticsResponse)
 async def get_district_statistics(
     district_id: str,
     request: StatisticsRequest,
     computation: Annotated[RasterComputation, Depends(get_raster_computation)],
+    dms_repo: Annotated[
+        PostgresDistrictMonthlyStatisticsRepository, Depends(get_dms_repository)
+    ],
 ) -> StatisticsResponse:
-    """Get aggregated raster statistics for a district over a month range."""
+    """Get aggregated raster statistics for a district over a month range.
+
+    Reads precomputed rows from district_monthly_statistics first; any
+    month not yet precomputed is computed live (single district, single
+    month) and folded into the aggregation, so the endpoint never
+    depends on the full backfill being complete.
+    """
     with request_context() as req_id:
         logger.info(
             "REQUEST_BEGIN endpoint=district_statistics request_id=%s "
@@ -111,43 +150,78 @@ async def get_district_statistics(
             )
             _validate_range_against_inventory(request, available)
 
-            try:
-                aggregated = await computation.compute_for_district_range(
-                    district_gid=district_id,
-                    start_year=request.start_year,
-                    start_month=request.start_month,
-                    end_year=request.end_year,
-                    end_month=request.end_month,
-                    variable=request.variable,
+            dms_rows = await dms_repo.list_for_district_range(
+                provider="era5-land",
+                variable=request.variable,
+                gid_2=district_id,
+                start_year=request.start_year,
+                start_month=request.start_month,
+                end_year=request.end_year,
+                end_month=request.end_month,
+            )
+            have = {(r.year, r.month) for r in dms_rows}
+            per_month_means = [r.mean for r in dms_rows]
+            per_month_mins = [r.minimum for r in dms_rows]
+            per_month_maxes = [r.maximum for r in dms_rows]
+
+            missing = _missing_months(
+                have, request.start_year, request.start_month,
+                request.end_year, request.end_month,
+            )
+
+            if missing:
+                logger.info(
+                    "REQUEST_INFO endpoint=district_statistics request_id=%s "
+                    "district_id=%s variable=%s precomputed=%d missing=%d "
+                    "-- falling back to live compute for missing months",
+                    req_id, district_id, request.variable, len(dms_rows), len(missing),
                 )
-            except ValueError as exc:
-                message = str(exc)
-                if message == _NO_PERIOD_MESSAGE:
-                    logger.info(
-                        "REQUEST_ERROR endpoint=district_statistics request_id=%s "
-                        "error=no_period pid=%d thread_id=%d",
-                        req_id, os.getpid(), threading.get_ident(),
-                    )
-                    flush()
-                    raise HTTPException(
-                        status_code=status.HTTP_404_NOT_FOUND,
-                        detail=_NO_PERIOD_MESSAGE,
-                    )
+                flush()
+                for (y, m) in missing:
+                    try:
+                        clip = await computation.compute_for_district(
+                            district_gid=district_id,
+                            provider="era5-land",
+                            variable=request.variable,
+                            year=y,
+                            month=m,
+                        )
+                        per_month_means.append(clip.mean)
+                        per_month_mins.append(clip.minimum)
+                        per_month_maxes.append(clip.maximum)
+                    except Exception:
+                        logger.exception(
+                            "REQUEST_ERROR endpoint=district_statistics request_id=%s "
+                            "error=live_fallback_failed district_id=%s variable=%s "
+                            "%04d-%02d",
+                            req_id, district_id, request.variable, y, m,
+                        )
+                        flush()
+                        continue
+
+            if not per_month_means:
                 logger.info(
                     "REQUEST_ERROR endpoint=district_statistics request_id=%s "
-                    "error=value_error detail=%s pid=%d thread_id=%d",
-                    req_id, message, os.getpid(), threading.get_ident(),
+                    "error=no_period pid=%d thread_id=%d",
+                    req_id, os.getpid(), threading.get_ident(),
                 )
                 flush()
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
-                    detail=message,
+                    detail=_NO_PERIOD_MESSAGE,
                 )
+
+            # Same reduction rule as the old RasterComputation._aggregate_for_geometry:
+            # mean-of-means, min-of-mins, max-of-maxes.
+            months_processed = len(per_month_means)
+            mean_value = float(np.mean(per_month_means))
+            min_value = float(np.min(per_month_mins))
+            max_value = float(np.max(per_month_maxes))
 
             logger.info(
                 "REQUEST_END endpoint=district_statistics request_id=%s "
                 "district_id=%s months_processed=%d pid=%d thread_id=%d task_id=%s",
-                req_id, district_id, aggregated.months_processed,
+                req_id, district_id, months_processed,
                 os.getpid(), threading.get_ident(), id(asyncio.current_task()),
             )
             flush()
@@ -158,10 +232,10 @@ async def get_district_statistics(
                 start_month=request.start_month,
                 end_year=request.end_year,
                 end_month=request.end_month,
-                months_processed=aggregated.months_processed,
-                mean=aggregated.mean,
-                min=aggregated.minimum,
-                max=aggregated.maximum,
+                months_processed=months_processed,
+                mean=mean_value,
+                min=min_value,
+                max=max_value,
             )
         except HTTPException:
             raise
@@ -180,8 +254,16 @@ async def get_district_time_series(
     district_id: str,
     request: StatisticsRequest,
     computation: Annotated[RasterComputation, Depends(get_raster_computation)],
+    dms_repo: Annotated[
+        PostgresDistrictMonthlyStatisticsRepository, Depends(get_dms_repository)
+    ],
 ) -> DistrictMonthlySeriesResponse:
     """Get per-month raster statistics for a district over a month range.
+
+    Reads precomputed rows from district_monthly_statistics first; any
+    month not yet precomputed falls back to a live single-district,
+    single-month clip so a gap costs proportional to the gap, not the
+    whole request.
 
     The response is the natural primitive for the BottomPanel's Time
     Series, Trend, and Export tabs — each ``point`` carries the
@@ -221,37 +303,74 @@ async def get_district_time_series(
             )
             _validate_range_against_inventory(request, available)
 
-            try:
-                points = await computation.compute_monthly_series_for_district(
-                    district_gid=district_id,
-                    start_year=request.start_year,
-                    start_month=request.start_month,
-                    end_year=request.end_year,
-                    end_month=request.end_month,
-                    variable=request.variable,
+            dms_rows = await dms_repo.list_for_district_range(
+                provider="era5-land",
+                variable=request.variable,
+                gid_2=district_id,
+                start_year=request.start_year,
+                start_month=request.start_month,
+                end_year=request.end_year,
+                end_month=request.end_month,
+            )
+            have = {(r.year, r.month) for r in dms_rows}
+            points: list[MonthlySeriesPoint] = [
+                MonthlySeriesPoint(
+                    year=r.year, month=r.month,
+                    mean=r.mean, min=r.minimum, max=r.maximum,
                 )
-            except ValueError as exc:
-                message = str(exc)
-                if message == _NO_PERIOD_MESSAGE:
-                    logger.info(
-                        "REQUEST_ERROR endpoint=district_time_series request_id=%s "
-                        "error=no_period pid=%d thread_id=%d",
-                        req_id, os.getpid(), threading.get_ident(),
-                    )
-                    flush()
-                    raise HTTPException(
-                        status_code=status.HTTP_404_NOT_FOUND,
-                        detail=_NO_PERIOD_MESSAGE,
-                    )
+                for r in dms_rows
+            ]
+
+            missing = _missing_months(
+                have, request.start_year, request.start_month,
+                request.end_year, request.end_month,
+            )
+
+            if missing:
+                logger.info(
+                    "REQUEST_INFO endpoint=district_time_series request_id=%s "
+                    "district_id=%s variable=%s precomputed=%d missing=%d "
+                    "-- falling back to live compute for missing months",
+                    req_id, district_id, request.variable, len(points), len(missing),
+                )
+                flush()
+                for (y, m) in missing:
+                    try:
+                        clip = await computation.compute_for_district(
+                            district_gid=district_id,
+                            provider="era5-land",
+                            variable=request.variable,
+                            year=y,
+                            month=m,
+                        )
+                        points.append(
+                            MonthlySeriesPoint(
+                                year=y, month=m,
+                                mean=clip.mean, min=clip.minimum, max=clip.maximum,
+                            )
+                        )
+                    except Exception:
+                        logger.exception(
+                            "REQUEST_ERROR endpoint=district_time_series request_id=%s "
+                            "error=live_fallback_failed district_id=%s variable=%s "
+                            "%04d-%02d",
+                            req_id, district_id, request.variable, y, m,
+                        )
+                        flush()
+                        continue
+
+            points.sort(key=lambda p: (p.year, p.month))
+
+            if not points:
                 logger.info(
                     "REQUEST_ERROR endpoint=district_time_series request_id=%s "
-                    "error=value_error detail=%s pid=%d thread_id=%d",
-                    req_id, message, os.getpid(), threading.get_ident(),
+                    "error=no_period pid=%d thread_id=%d",
+                    req_id, os.getpid(), threading.get_ident(),
                 )
                 flush()
                 raise HTTPException(
                     status_code=status.HTTP_404_NOT_FOUND,
-                    detail=message,
+                    detail=_NO_PERIOD_MESSAGE,
                 )
 
             logger.info(
@@ -328,9 +447,6 @@ async def get_district_raster_clip(
     clipped cells as a GeoJSON ``FeatureCollection`` plus summary
     statistics and operator-facing diagnostics.
 
-    Boundary cells preserve the original ERA5 cell value; only the
-    geometry is clipped at the district border. Cells entirely outside
-    the district are excluded from the response.
     """
     with request_context() as req_id:
         logger.info(
@@ -363,7 +479,6 @@ async def get_district_raster_clip(
                     detail=str(exc),
                 )
             except KeyError as exc:
-                # Unknown HydroAtlas variable name.
                 logger.info(
                     "REQUEST_ERROR endpoint=district_raster_clip request_id=%s "
                     "error=unknown_variable detail=%s pid=%d thread_id=%d",
@@ -376,9 +491,6 @@ async def get_district_raster_clip(
                 )
             except ValueError as exc:
                 message = str(exc)
-                # Asset-missing vs. bbox-misses-raster are both 404 from
-                # the user's perspective; the message is enough to tell
-                # them which one happened.
                 logger.info(
                     "REQUEST_ERROR endpoint=district_raster_clip request_id=%s "
                     "error=value_error detail=%s pid=%d thread_id=%d",
@@ -405,8 +517,6 @@ async def get_district_raster_clip(
                     ),
                 )
 
-            # Enforce the max_features safety cap so a runaway request
-            # cannot OOM the process; we never silently truncate.
             n_features = len(result.feature_collection.get("features", []))
             if n_features > clipper.max_features:
                 logger.warning(

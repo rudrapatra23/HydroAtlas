@@ -15,13 +15,16 @@ from infrastructure.repositories.postgres_dataset_repository import (
     PostgresDatasetRepository,
 )
 from infrastructure.storage.s3_storage_adapter import S3StorageAdapter
-
+from infrastructure.repositories.postgres_district_monthly_statistics_repository import PostgresDistrictMonthlyStatisticsRepository
 
 async def get_repository(
     session: Annotated[AsyncSession, Depends(get_session)]
 ) -> DatasetRepository:
     return PostgresDatasetRepository(session)
-
+async def get_dms_repository(
+    session: Annotated[AsyncSession, Depends(get_session)],
+) -> PostgresDistrictMonthlyStatisticsRepository:
+    return PostgresDistrictMonthlyStatisticsRepository(session)
 
 async def get_storage() -> StoragePort:
     return S3StorageAdapter()

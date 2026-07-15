@@ -57,7 +57,11 @@ services:
     restart: "no"
     env_file:
       - ./backend/.env
-    command: ["python", "-m", "ingestion.era5.scheduler"]
+
+    command: [
+      "sh", "-c",
+      "python -m ingestion.era5.scheduler && python -m ingestion.era5.precompute_backfill --recent-years ${ERA5_HISTORY_YEARS:-10}"
+    ]
     depends_on:
       migrate:
         condition: service_completed_successfully

@@ -1,6 +1,11 @@
 import { Link } from "react-router-dom";
 import Navbar from "../components/landing/Navbar";
 import Footer from "../components/landing/Footer";
+import copernicusLogo from "../assets/copernicus-logo-png_seeklogo-501801.webp";
+import maplibreLogo from "../assets/maplibregl.webp";
+import fastapiLogo from "../assets/FastAPI.svg";
+import awsLogo from "../assets/icons8-aws-logo.svg";
+import neonLogo from "../assets/neon-logo-light-color.svg";
 
 /**
  * Landing page — marketing home for HydraAtlas.
@@ -99,28 +104,45 @@ export default function LandingPage() {
       {/* ─── Trusted Technologies ─── */}
       <section className="border-b border-slate-100 bg-white py-16">
         <div className="mx-auto max-w-5xl px-6">
-          <p className="text-center text-xs font-semibold uppercase tracking-wider text-slate-400">
+          <p className="text-center text-xs font-semibold uppercase tracking-wider text-slate-700">
             Built on trusted technologies
           </p>
           <div className="mt-8 flex flex-wrap items-center justify-center gap-x-12 gap-y-6">
-            {[
-              "ERA5-Land",
-              "Copernicus CDS",
-              "MapLibre GL",
-              "FastAPI",
-              "PostgreSQL",
-              "Amazon S3",
-            ].map((tech) => (
-              <span
-                key={tech}
-                className="text-sm font-semibold tracking-tight text-slate-400 transition-colors hover:text-slate-600"
-              >
-                {tech}
-              </span>
-            ))}
+            {/* Adjust height/width per logo to taste */}
+            <img
+              src={copernicusLogo}
+              alt="Copernicus CDS"
+              className="object-contain"
+              style={{ height: 130, width: "auto" }}
+            />
+            <img
+              src={maplibreLogo}
+              alt="MapLibre GL"
+              className="object-contain"
+              style={{ height: 36, width: "auto" }}
+            />
+            <img
+              src={fastapiLogo}
+              alt="FastAPI"
+              className="object-contain"
+              style={{ height: 32, width: "auto" }}
+            />
+            <img
+              src={neonLogo}
+              alt="Neon (PostgreSQL)"
+              className="object-contain"
+              style={{ height: 35, width: "auto" }}
+            />
+            <img
+              src={awsLogo}
+              alt="Amazon S3"
+              className="object-contain"
+              style={{ height: 65, width: "auto" }}
+            />
           </div>
         </div>
       </section>
+
 
       {/* ─── Features Anchor ─── */}
       <section id="features" className="py-24 sm:py-32">
